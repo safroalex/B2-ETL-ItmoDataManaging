@@ -1,0 +1,139 @@
+version: "3.8"
+
+x-airflow-common: &airflow-common
+  image: airflow-custom:2.9.2
+  env_file:
+    - ./airflow.env
+  environment:
+    &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__FERNET_KEY: "Jc1VnXw8Rr8cV8oy7gqQbJZ1xZ3cR3v1Nq2xkQd3R8Q="
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__WEBSERVER__RBAC: "True"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+    AIRFLOW_HOME: /opt/airflow
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mongodb:
+      condition: service_started
+  networks:
+    - etl-net
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: weather-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: weather
+      MONGO_INITDB_ROOT_PASSWORD: weather
+      MONGO_INITDB_DATABASE: weather
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - etl-net
+
+  postgres:
+    image: postgres:15
+    container_name: weather-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/weather_schema.sql:/docker-entrypoint-initdb.d/weather_schema.sql:ro
+    networks:
+      - etl-net
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
+        airflow db migrate
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin || true
+        airflow connections delete 'mongo_weather' || true
+        airflow connections add 'mongo_weather' --conn-type mongo --conn-host mongodb --conn-port 27017 --conn-login weather --conn-password weather --conn-schema weather --conn-extra '{"authSource": "admin"}'
+        airflow connections delete 'postgres_weather' || true
+        airflow connections add 'postgres_weather' --conn-type postgres --conn-host postgres --conn-port 5432 --conn-login airflow --conn-password airflow --conn-schema analytics --conn-extra '{"sslmode": "disable"}'
+        airflow variables set WEATHER_TARGET_TABLE weather_analytics
+    healthcheck:
+      test: ["CMD", "airflow", "db", "check"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  weather-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: weather-service
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://weather:weather@mongodb:27017
+      MONGO_DB: weather
+      MONGO_COLLECTION: weather_raw
+      YANDEX_API_KEY: 4b58efb3-3711-4760-b6e3-377eba3ab46a
+      WEATHER_LAT: "55.75"
+      WEATHER_LON: "37.61"
+      POLLING_INTERVAL_SECONDS: "600"
+      LOG_LEVEL: INFO
+    depends_on:
+      mongodb:
+        condition: service_started
+    networks:
+      - etl-net
+
+networks:
+  etl-net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  postgres_data:

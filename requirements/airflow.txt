@@ -1,0 +1,4 @@
+pymongo==4.7.1
+psycopg2-binary==2.9.9
+apache-airflow-providers-mongo==5.0.0
+apache-airflow-providers-postgres==5.6.1
