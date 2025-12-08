@@ -25,11 +25,14 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
+      - name: Define archive path
+        run: echo "ARCHIVE_PATH=$RUNNER_TEMP/b2-etl-release.tar.gz" >> "$GITHUB_ENV"
+
       - name: Package repository
-        run: tar --exclude='.git' -czf release.tar.gz .
+        run: tar --exclude='.git' -czf "$ARCHIVE_PATH" .
 
       - name: Upload bundle to server
-        run: scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no release.tar.gz $DEPLOY_USER@$DEPLOY_HOST:/tmp/b2-etl-release.tar.gz
+        run: scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no "$ARCHIVE_PATH" $DEPLOY_USER@$DEPLOY_HOST:/tmp/b2-etl-release.tar.gz
 
       - name: Deploy on remote host
         run: |
