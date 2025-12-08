@@ -36,7 +36,7 @@ jobs:
 
       - name: Deploy on remote host
         run: |
-          ssh -p $DEPLOY_PORT -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST <<'EOF'
+          ssh -p $DEPLOY_PORT -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST <<EOF
           set -euo pipefail
           sudo mkdir -p "$DEPLOY_PATH"
           sudo chown "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_PATH"
