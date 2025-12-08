@@ -46,5 +46,9 @@ jobs:
           printf "AIRFLOW_UID=%s\nAIRFLOW_GID=0\n" "$(id -u)" > airflow.env
           mkdir -p logs dags plugins
           docker compose down || true
-          docker compose up -d --build
+          if ! docker compose up -d --build; then
+            docker compose logs --no-color --tail=200 airflow-init || true
+            exit 1
+          fi
+          docker compose logs --no-color --tail=50 airflow-init
           EOF
