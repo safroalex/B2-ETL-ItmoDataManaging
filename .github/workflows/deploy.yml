@@ -46,7 +46,10 @@ jobs:
           export AIRFLOW_UID="$(id -u)"
           export AIRFLOW_GID=0
           printf "AIRFLOW_UID=%s\nAIRFLOW_GID=%s\n" "$AIRFLOW_UID" "$AIRFLOW_GID" > airflow.env
+          chmod 664 airflow.env
+          rm -rf logs dags plugins
           mkdir -p logs dags plugins
+          chmod -R 775 logs dags plugins
           chown -R "$DEPLOY_USER":"$DEPLOY_USER" logs dags plugins
           docker compose down || true
           if ! docker compose up -d --build; then
