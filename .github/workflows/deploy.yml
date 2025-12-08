@@ -43,6 +43,8 @@ jobs:
           tar -xzf /tmp/b2-etl-release.tar.gz -C "$DEPLOY_PATH"
           rm /tmp/b2-etl-release.tar.gz
           cd "$DEPLOY_PATH"
+          printf "AIRFLOW_UID=%s\nAIRFLOW_GID=0\n" "$(id -u)" > airflow.env
+          mkdir -p logs dags plugins
           docker compose down || true
           docker compose up -d --build
           EOF
