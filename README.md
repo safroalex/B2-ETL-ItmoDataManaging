@@ -94,6 +94,15 @@ Once the DAG is unpaused, the scheduler continues to execute it hourly without m
 4. Launch the stack with `docker compose up -d --build` and expose the Airflow UI through HTTPS with authentication (VPN, reverse proxy, or security groups).
 5. Point monitoring/alerting at the Airflow scheduler logs and database health checks.
 
+### GitHub Actions deployment pipeline
+
+- Workflow: `.github/workflows/deploy.yml` (runs on pushes to `main` or `feature/partOne` and on manual dispatch).
+- Secrets required: `DEPLOY_SSH_KEY` containing the private key for the `cybrex@213.165.34.52` account.
+- Remote path: `/opt/b2-etl-itmodata` (created automatically if missing).
+- Behavior: packs the repository, securely copies it to the server, and runs `docker compose down && docker compose up -d --build` to refresh the stack.
+
+Before enabling the workflow, provision the deployment user and SSH keys as described in `docs/server_setup.md`.
+
 ## Operations & Troubleshooting
 
 - Weather service logs: `docker compose logs -f weather-service`

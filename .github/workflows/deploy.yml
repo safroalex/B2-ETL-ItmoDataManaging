@@ -1,0 +1,45 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+      - feature/partOne
+  workflow_dispatch:
+
+env:
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+  DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+  DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+  DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Package repository
+        run: tar --exclude='.git' -czf release.tar.gz .
+
+      - name: Upload bundle to server
+        run: scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no release.tar.gz $DEPLOY_USER@$DEPLOY_HOST:/tmp/b2-etl-release.tar.gz
+
+      - name: Deploy on remote host
+        run: |
+          ssh -p $DEPLOY_PORT -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST <<'EOF'
+          set -euo pipefail
+          sudo mkdir -p "$DEPLOY_PATH"
+          sudo chown "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_PATH"
+          tar -xzf /tmp/b2-etl-release.tar.gz -C "$DEPLOY_PATH"
+          rm /tmp/b2-etl-release.tar.gz
+          cd "$DEPLOY_PATH"
+          docker compose down || true
+          docker compose up -d --build
+          EOF
