@@ -12,7 +12,6 @@ env:
   DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
   DEPLOY_USER: ${{ vars.DEPLOY_USER }}
   DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-  DEPLOY_SUDO_PASS: ${{ secrets.DEPLOY_SUDO_PASSWORD }}
 
 jobs:
   deploy:
@@ -39,11 +38,11 @@ jobs:
         run: |
           ssh -p $DEPLOY_PORT -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST <<EOF
           set -euo pipefail
-          echo "$DEPLOY_SUDO_PASS" | sudo -S mkdir -p "$DEPLOY_PATH"
-          echo "$DEPLOY_SUDO_PASS" | sudo -S chown "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_PATH"
+          mkdir -p "$DEPLOY_PATH"
+          chown "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_PATH"
           tar -xzf /tmp/b2-etl-release.tar.gz -C "$DEPLOY_PATH"
           rm /tmp/b2-etl-release.tar.gz
           cd "$DEPLOY_PATH"
-          echo "$DEPLOY_SUDO_PASS" | sudo -S docker compose down || true
-          echo "$DEPLOY_SUDO_PASS" | sudo -S docker compose up -d --build
+          docker compose down || true
+          docker compose up -d --build
           EOF
