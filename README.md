@@ -97,7 +97,9 @@ Once the DAG is unpaused, the scheduler continues to execute it hourly without m
 ### GitHub Actions deployment pipeline
 
 - Workflow: `.github/workflows/deploy.yml` (runs on pushes to `main` or `feature/partOne` and on manual dispatch).
-- Secrets required: `DEPLOY_SSH_KEY` containing the private key for the `cybrex@213.165.34.52` account.
+- Secrets required:
+   - `DEPLOY_SSH_KEY` – private key for the `cybrex@213.165.34.52` account.
+   - `DEPLOY_SUDO_PASSWORD` – password for the same user so `sudo`-guarded Docker commands can run non-interactively.
 - Remote path: `/opt/b2-etl-itmodata` (created automatically if missing).
 - Behavior: packs the repository, securely copies it to the server, and runs `docker compose down && docker compose up -d --build` to refresh the stack.
 
