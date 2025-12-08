@@ -7,23 +7,17 @@ on:
       - feature/partOne
   workflow_dispatch:
 
-env:
-  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-  DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
-  DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-  DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_PASSWORD: ${{ secrets.ROOT_DEPLOY_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
 
       - name: Define archive path
         run: echo "ARCHIVE_PATH=$RUNNER_TEMP/b2-etl-release.tar.gz" >> "$GITHUB_ENV"
@@ -32,14 +26,15 @@ jobs:
         run: tar --exclude='.git' -czf "$ARCHIVE_PATH" .
 
       - name: Upload bundle to server
-        run: scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no "$ARCHIVE_PATH" $DEPLOY_USER@$DEPLOY_HOST:/tmp/b2-etl-release.tar.gz
+        run: sshpass -p "$DEPLOY_PASSWORD" scp -P 22 -o StrictHostKeyChecking=no "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
 
       - name: Deploy on remote host
         run: |
-          ssh -p $DEPLOY_PORT -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST <<EOF
+          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<EOF
           set -euo pipefail
+          DEPLOY_PATH="/root/b2-etl-itmodata"
           mkdir -p "$DEPLOY_PATH"
-          chown "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_PATH"
+          chown root:"root" "$DEPLOY_PATH"
           tar -xzf /tmp/b2-etl-release.tar.gz -C "$DEPLOY_PATH"
           rm /tmp/b2-etl-release.tar.gz
           cd "$DEPLOY_PATH"
@@ -50,7 +45,7 @@ jobs:
           rm -rf logs dags plugins
           mkdir -p logs dags plugins
           chmod -R 775 logs dags plugins
-          chown -R "$DEPLOY_USER":"$DEPLOY_USER" logs dags plugins
+          chown -R root:"root" logs dags plugins
           docker compose down || true
           if ! docker compose up -d --build; then
             docker compose logs --no-color --tail=200 airflow-init || true
