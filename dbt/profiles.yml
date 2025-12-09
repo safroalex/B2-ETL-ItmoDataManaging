@@ -1,0 +1,26 @@
+
+weather_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'postgres') }}"
+      user: "{{ env_var('DBT_USER', 'airflow') }}"
+      password: "{{ env_var('DBT_PASSWORD', 'airflow') }}"
+      port: "{{ env_var('DBT_PORT', 5432) | int }}"
+      dbname: "{{ env_var('DBT_DBNAME', 'analytics') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+      threads: 1
+
+elementary:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'postgres') }}"
+      user: "{{ env_var('DBT_USER', 'airflow') }}"
+      password: "{{ env_var('DBT_PASSWORD', 'airflow') }}"
+      port: "{{ env_var('DBT_PORT', 5432) | int }}"
+      dbname: "{{ env_var('DBT_DBNAME', 'analytics') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+      threads: 1

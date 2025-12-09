@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from airflow import DAG
+from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
@@ -16,6 +17,7 @@ MONGO_CONN_ID = "mongo_weather"
 POSTGRES_CONN_ID = "postgres_weather"
 MONGO_COLLECTION = "weather_raw"
 TARGET_TABLE = "weather_analytics"
+DBT_PROJECT_DIR = "/opt/airflow/dbt"
 
 
 def extract_documents(**context: Any) -> List[Dict[str, Any]]:
@@ -122,9 +124,24 @@ def create_dag() -> DAG:
             python_callable=load_rows,
         )
 
+        dbt_run = BashOperator(
+            task_id="dbt_run",
+            bash_command=f"cd {DBT_PROJECT_DIR} && dbt deps && dbt run --select elementary --full-refresh && dbt run",
+        )
+
+        dbt_test = BashOperator(
+            task_id="dbt_test",
+            bash_command=f"cd {DBT_PROJECT_DIR} && dbt test",
+        )
+
+        edr_report = BashOperator(
+            task_id="edr_report",
+            bash_command=f"cd {DBT_PROJECT_DIR} && edr report --file-path /opt/airflow/dbt/target/elementary_report.html --profiles-dir .",
+        )
+
         end = EmptyOperator(task_id="end", trigger_rule=TriggerRule.ALL_DONE)
 
-        start >> extract >> transform >> load >> end
+        start >> extract >> transform >> load >> dbt_run >> dbt_test >> edr_report >> end
 
     return dag
 

@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: ods_weather_incremental
+    description: "Operational Data Store with incremental loading (delete+insert)."
+    config:
+      elementary:
+        timestamp_column: observed_at
+    tests:
+      - elementary.volume_anomalies:
+          config:
+            severity: warn
+    columns:
+      - name: observed_at
+        tests:
+          - unique
+          - not_null
+
+  - name: ods_weather_merge
+    description: "Operational Data Store with incremental loading (merge)."
+    columns:
+      - name: observed_at
+        tests:
+          - unique
+          - not_null

@@ -9,7 +9,8 @@ This repository contains Part One of the Itmo Data Managing course project: a pr
 | **Weather ingestion service** (`src/app.py`) | Polls the Yandex Weather API on a fixed cadence, enriches each payload with `fetched_at`, and writes documents into MongoDB.
 | **MongoDB** | Durable store for the raw weather snapshots (`weather.weather_raw` collection).
 | **PostgreSQL** | Hosts both the Airflow metadata database and the analytics schema (`analytics.weather_analytics`).
-| **Apache Airflow** | Runs on the LocalExecutor, orchestrating the hourly extract–transform–load pipeline.
+| **Apache Airflow** | Runs on the LocalExecutor, orchestrating the hourly extract–transform–load pipeline and triggering dbt models.
+| **dbt** | Transforms data in PostgreSQL (STG -> ODS -> DM) and runs data quality tests via Elementary.
 | **Docker Compose** | Spins up MongoDB, PostgreSQL, the Airflow components (init, scheduler, webserver), and the weather service in a single command.
 
 ## Repository Artifacts
@@ -25,6 +26,40 @@ This repository contains Part One of the Itmo Data Managing course project: a pr
 | `src/app.py` | Weather ingestion loop with graceful shutdown and structured logging. |
 | `requirements/airflow.txt` | Python packages baked into the Airflow image (Mongo + Postgres providers). |
 | `logs/.gitkeep` & `plugins/.gitkeep` | Empty placeholders so Airflow volume mounts resolve inside the containers. |
+| `dbt/` | Contains the dbt project (models, profiles, tests) for data transformation and quality monitoring. |
+
+## Part 2: DBT & Elementary Integration
+
+The project has been extended with **dbt** for data transformation and **Elementary** for data observability.
+
+### DBT Project Structure (`dbt/`)
+
+The dbt project is configured to run against the PostgreSQL `analytics` database.
+
+- **Models**:
+  - `staging/stg_weather`: View over the raw `weather_analytics` table.
+  - `ods/ods_weather_incremental`: Incremental table using `delete+insert` strategy (standard incremental).
+  - `ods/ods_weather_merge`: Incremental table using `merge` strategy (Postgres 15+).
+  - `marts/dm_weather_daily`: Daily aggregation of weather metrics.
+- **Tests**:
+  - Basic schema tests (unique, not null) defined in `sources.yml`.
+  - Elementary data quality monitoring enabled via `packages.yml`.
+
+### Airflow Integration
+
+The `etl_weather` DAG now includes additional tasks:
+1. `dbt_run`: Executes `dbt run` to build/update models.
+2. `dbt_test`: Executes `dbt test` to run schema tests and Elementary monitors.
+3. `edr_report`: Generates the Elementary data quality report.
+
+### Elementary Dashboard
+
+The project includes a lightweight server to view the Elementary data quality report.
+After the DAG runs successfully (specifically the `edr_report` task), you can access the dashboard at:
+
+**<http://localhost:8081/elementary_report.html>**
+
+This report provides a visual interface for test results, data lineage, and anomaly detection.
 
 ## Local Prerequisites
 
@@ -83,6 +118,20 @@ Bootstrap actions (Airflow DB migration, admin user creation, connection setup, 
      -c "SELECT * FROM weather_analytics ORDER BY observed_at DESC LIMIT 5;"
    ```
    Timestamps and metrics should line up with the raw Mongo documents from step 2.
+6. **DBT Models** – check the created tables in Postgres:
+   ```bash
+   docker compose exec postgres \
+     psql -U airflow -d analytics \
+     -c "SELECT table_name FROM information_schema.tables WHERE table_schema IN ('dbt_stg', 'dbt_ods', 'dbt_dm');"
+   ```
+   You should see `stg_weather`, `ods_weather_incremental`, `ods_weather_merge`, and `dm_weather_daily`.
+
+7. **Elementary Reports** – Elementary tables are created in the `dbt_elementary` schema (or similar, depending on config). You can check for test results:
+   ```bash
+   docker compose exec postgres \
+     psql -U airflow -d analytics \
+     -c "SELECT count(*) FROM dbt_elementary.elementary_test_results;"
+   ```
 
 Once the DAG is unpaused, the scheduler continues to execute it hourly without manual intervention.
 
@@ -115,4 +164,3 @@ Before enabling the workflow, provision the deployment user and SSH keys as desc
 - Store the Yandex API key and Airflow credentials outside the repository (Compose `.env`, Docker secrets, Vault, etc.).
 - Rotate credentials regularly and change the default Airflow admin password before exposing the UI beyond localhost.
 - Restrict ingress to MongoDB and PostgreSQL when deploying in shared or cloud environments.
-

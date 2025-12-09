@@ -13,10 +13,16 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__RBAC: "True"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
     AIRFLOW_HOME: /opt/airflow
+    DBT_HOST: postgres
+    DBT_USER: airflow
+    DBT_PASSWORD: airflow
+    DBT_DBNAME: analytics
+    DBT_SCHEMA: dbt
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
+    - ./dbt:/opt/airflow/dbt
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     postgres:
@@ -79,6 +85,13 @@ services:
         airflow connections delete 'postgres_weather' || true
         airflow connections add 'postgres_weather' --conn-type postgres --conn-host postgres --conn-port 5432 --conn-login airflow --conn-password airflow --conn-schema analytics --conn-extra '{"sslmode": "disable"}'
         airflow variables set WEATHER_TARGET_TABLE weather_analytics
+        
+        # Initialize DBT and Elementary
+        if [ -d "/opt/airflow/dbt" ]; then
+          cd /opt/airflow/dbt
+          dbt deps
+          dbt run-operation elementary.install_schema || true
+        fi
     healthcheck:
       test: ["CMD", "airflow", "db", "check"]
       interval: 30s
@@ -127,6 +140,17 @@ services:
     depends_on:
       mongodb:
         condition: service_started
+    networks:
+      - etl-net
+
+  elementary-report:
+    image: python:3.11-slim
+    container_name: elementary-report
+    command: python -m http.server 8000 --directory /reports
+    volumes:
+      - ./dbt/target:/reports
+    ports:
+      - "8081:8000"
     networks:
       - etl-net
 

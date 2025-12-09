@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: stg_weather
+    description: "Staging model for weather data. Cleans and standardizes raw input."
+    columns:
+      - name: observed_at
+        description: "Timestamp of observation (UTC)"
+        tests:
+          - unique
+          - not_null
+      - name: temperature_c
+        description: "Air temperature in Celsius"
+        tests:
+          - not_null
+          - valid_temperature
+      - name: humidity
+        description: "Relative humidity (%)"
+        tests:
+          - not_null

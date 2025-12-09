@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: dm_weather_daily
+    description: "Daily aggregated weather metrics."
+    columns:
+      - name: date_day
+        description: "Date of the aggregation"
+        tests:
+          - unique
+          - not_null
+      - name: avg_temperature_c
+        description: "Average daily temperature"
+        tests:
+          - valid_temperature
+      - name: observations_count
+        description: "Number of observations per day"
+        tests:
+          - not_null

@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw_weather
+    database: analytics
+    schema: public
+    tables:
+      - name: weather_analytics
+        description: "Raw weather data loaded from MongoDB"
+        columns:
+          - name: observed_at
+            tests:
+              - unique
+              - not_null
+          - name: temperature_c
+          - name: humidity
+          - name: pressure_mm
+          - name: pressure_pa
