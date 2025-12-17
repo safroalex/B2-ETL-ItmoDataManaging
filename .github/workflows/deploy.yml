@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/partOne
+      - feature/partTwo
   workflow_dispatch:
 
 jobs:
