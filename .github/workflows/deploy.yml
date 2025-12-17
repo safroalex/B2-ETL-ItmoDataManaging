@@ -111,6 +111,72 @@ jobs:
           docker compose exec -T postgres pg_isready -U airflow
           docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })"
 
+          echo "--- post-deploy pipeline run (weather_ingest + el_weather) ---"
+          # Ensure DAGs are unpaused
+          docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest || true
+          docker compose exec -T airflow-scheduler airflow dags unpause el_weather || true
+
+          # For @hourly EL DAG: choose exec-date = next UTC hour so interval covers current hour
+          CUR_HOUR_UTC="$(date -u +"%Y-%m-%dT%H:00:00+00:00")"
+          NEXT_HOUR_UTC="$(date -u -d "+1 hour" +"%Y-%m-%dT%H:00:00+00:00")"
+          echo "Using CUR_HOUR_UTC=$CUR_HOUR_UTC NEXT_HOUR_UTC=$NEXT_HOUR_UTC"
+
+          wait_dag_run() {
+            local dag_id="$1"
+            local run_id="$2"
+            local timeout_s="${3:-900}"
+            local started
+            started="$(date +%s)"
+            while true; do
+              # Parse list-runs output: dag_id | run_id | state | ...
+              state="$(docker compose exec -T airflow-scheduler airflow dags list-runs -d "$dag_id" --no-backfill -o table \
+                | awk -F'|' -v rid="$run_id" 'BEGIN{IGNORECASE=1} $2 ~ rid {gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3; exit}')"
+
+              if [ -n "$state" ]; then
+                echo "$dag_id/$run_id state=$state"
+                case "$state" in
+                  success) return 0 ;;
+                  failed|upstream_failed) return 1 ;;
+                esac
+              fi
+
+              now="$(date +%s)"
+              if [ $((now-started)) -ge "$timeout_s" ]; then
+                echo "Timeout waiting for $dag_id/$run_id" >&2
+                return 1
+              fi
+              sleep 10
+            done
+          }
+
+          # Run a couple of cycles so the report is definitely generated/updated
+          for i in 1 2; do
+            TS="$(date -u +"%Y%m%dT%H%M%SZ")"
+            INGEST_RUN_ID="postdeploy_weather_ingest_${TS}_${i}"
+            EL_RUN_ID="postdeploy_el_weather_${TS}_${i}"
+
+            echo "Triggering weather_ingest run_id=$INGEST_RUN_ID"
+            docker compose exec -T airflow-scheduler airflow dags trigger weather_ingest --run-id "$INGEST_RUN_ID"
+            wait_dag_run weather_ingest "$INGEST_RUN_ID" 300 || { dump_logs; exit 1; }
+
+            echo "Triggering el_weather exec_date=$NEXT_HOUR_UTC run_id=$EL_RUN_ID"
+            docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$NEXT_HOUR_UTC" --run-id "$EL_RUN_ID"
+            wait_dag_run el_weather "$EL_RUN_ID" 1800 || { dump_logs; exit 1; }
+          done
+
+          echo "--- verify outputs ---"
+          docker compose exec -T postgres psql -U airflow -d analytics -c "SELECT count(*) AS weather_raw_rows FROM weather_raw;" | cat
+          ROWS="$(docker compose exec -T postgres psql -U airflow -d analytics -tA -c "SELECT count(*) FROM weather_raw;" | tr -d '[:space:]')"
+          if [ "${ROWS:-0}" -lt 1 ]; then
+            echo "Expected weather_raw to have rows, got ${ROWS:-0}" >&2
+            dump_logs
+            exit 1
+          fi
+
+          # Verify Elementary report is served (file appears after edr_report task)
+          retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
+          echo "Elementary report is available at http://<host>:8081/elementary_report.html"
+
           echo "--- airflow-init logs (tail) ---"
           docker compose logs --no-color --tail=80 airflow-init
           EOF
