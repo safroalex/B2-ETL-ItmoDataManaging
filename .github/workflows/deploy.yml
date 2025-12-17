@@ -33,9 +33,6 @@ jobs:
           rm /tmp/b2-etl-release.tar.gz
           cd "$DEPLOY_PATH"
 
-          # Ensure report output directory exists on the host for the elementary-report container
-          mkdir -p dbt/target
-
           # Stop running containers before touching bind-mounted folders
           docker compose down || true
 
@@ -43,6 +40,12 @@ jobs:
           export AIRFLOW_GID=0
           printf "AIRFLOW_UID=%s\nAIRFLOW_GID=%s\n" "$AIRFLOW_UID" "$AIRFLOW_GID" > airflow.env
           chmod 664 airflow.env
+
+          # Ensure report output directory exists on the host for the elementary-report container
+          mkdir -p dbt/target
+          # Airflow containers run as "${AIRFLOW_UID}:0" (group root). Make target writable by group.
+          chown -R root:root dbt/target
+          chmod -R 775 dbt/target
 
           # Logs can contain nested scheduler folders; make cleanup idempotent
           rm -rf logs || true
@@ -178,7 +181,7 @@ jobs:
           # Verify Elementary report is served (file appears after edr_report task)
           if ! retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null; then
             echo "Report not served yet; attempting direct report generation as fallback" >&2
-            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." || true
+            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ."
             ls -la dbt/target | head -n 50 || true
             retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
           fi
