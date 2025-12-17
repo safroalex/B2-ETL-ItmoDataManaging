@@ -4,10 +4,14 @@ models:
   - name: stg_weather
     description: "Staging model for weather data. Cleans and standardizes raw input."
     columns:
-      - name: observed_at
-        description: "Timestamp of observation (UTC)"
+      - name: mongo_id
+        description: "MongoDB document id"
         tests:
           - unique
+          - not_null
+      - name: observed_at
+        description: "Timestamp the document was fetched (UTC)"
+        tests:
           - not_null
       - name: temperature_c
         description: "Air temperature in Celsius"

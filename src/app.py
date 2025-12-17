@@ -1,13 +1,13 @@
 import json
 import logging
 import os
-import signal
-import sys
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict
+import random
+from typing import Any, Dict, Optional
 
 import requests
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
@@ -21,21 +21,16 @@ LOGGER = logging.getLogger("weather-service")
 YA_API_URL = "https://api.weather.yandex.ru/v2/forecast"
 
 
-class GracefulShutdown:
-    """Capture termination signals so the loop can exit cleanly."""
+def get_mongo_collection() -> Collection:
+    mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+    mongo_db = os.getenv("MONGO_DB", "weather")
+    mongo_collection = os.getenv("MONGO_COLLECTION", "weather_raw")
 
-    def __init__(self) -> None:
-        self._stop_requested = False
-        signal.signal(signal.SIGINT, self._request_stop)
-        signal.signal(signal.SIGTERM, self._request_stop)
-
-    @property
-    def stop_requested(self) -> bool:
-        return self._stop_requested
-
-    def _request_stop(self, *_: Any) -> None:
-        LOGGER.info("Shutdown signal received, finishing current iteration...")
-        self._stop_requested = True
+    client = MongoClient(mongo_uri)
+    db = client[mongo_db]
+    collection = db[mongo_collection]
+    collection.create_index("fetched_at", background=True)
+    return collection
 
 
 def build_request(lat: str, lon: str, api_key: str) -> Dict[str, Any]:
@@ -65,61 +60,117 @@ def fetch_weather(lat: str, lon: str, api_key: str) -> Dict[str, Any]:
     return payload
 
 
-def get_mongo_collection() -> Collection:
-    mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-    mongo_db = os.getenv("MONGO_DB", "weather")
-    mongo_collection = os.getenv("MONGO_COLLECTION", "weather_raw")
-
-    client = MongoClient(mongo_uri)
-    db = client[mongo_db]
-    collection = db[mongo_collection]
-    collection.create_index("fetched_at", background=True)
-    return collection
-
-
-def main() -> None:
-    api_key = os.getenv("YANDEX_API_KEY")
-    if not api_key:
-        LOGGER.error("YANDEX_API_KEY is missing")
-        sys.exit(1)
-
-    lat = os.getenv("WEATHER_LAT", "55.75")
-    lon = os.getenv("WEATHER_LON", "37.61")
-    interval = int(os.getenv("POLLING_INTERVAL_SECONDS", "600"))
-
-    LOGGER.info(
-        "Starting weather ingestion loop (lat=%s, lon=%s, interval=%ss)",
-        lat,
-        lon,
-        interval,
+class IngestRequest(BaseModel):
+    lat: Optional[str] = Field(default=None, description="Latitude override")
+    lon: Optional[str] = Field(default=None, description="Longitude override")
+    fetched_at: Optional[str] = Field(
+        default=None,
+        description="Optional fetched_at override (ISO-8601, UTC recommended) - useful for demos/backfills.",
     )
 
-    collection = get_mongo_collection()
-    stopper = GracefulShutdown()
 
-    while not stopper.stop_requested:
+class IngestResponse(BaseModel):
+    mongo_id: str
+    fetched_at: str
+    temperature_c: Optional[float] = None
+    source: str = "yandex"
+
+
+app = FastAPI(
+    title="Weather Ingestion Service",
+    version="1.0.0",
+    description="HTTP service that fetches weather data from Yandex Weather API and stores raw payloads in MongoDB.",
+)
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def generate_mock_weather(lat: str, lon: str, fetched_at: str | None = None) -> Dict[str, Any]:
+    temp = round(random.uniform(-10, 30), 1)
+    humidity = int(random.uniform(20, 95))
+    pressure_mm = int(random.uniform(720, 780))
+    pressure_pa = pressure_mm * 133
+    return {
+        "lat": float(lat),
+        "lon": float(lon),
+        "fact": {
+            "temp": temp,
+            "humidity": humidity,
+            "pressure_mm": pressure_mm,
+            "pressure_pa": pressure_pa,
+        },
+        "fetched_at": fetched_at or datetime.now(timezone.utc).isoformat(),
+        "_source": "mock",
+    }
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/ingest", response_model=IngestResponse)
+def ingest(body: IngestRequest | None = None) -> IngestResponse:
+    body = body or IngestRequest()
+    lat = body.lat or os.getenv("WEATHER_LAT", "55.75")
+    lon = body.lon or os.getenv("WEATHER_LON", "37.61")
+    fetched_at_override = body.fetched_at
+
+    if fetched_at_override:
         try:
+            # Validate isoformat early (accepts both Z and +00:00 with normalization handled by fromisoformat)
+            datetime.fromisoformat(fetched_at_override.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid fetched_at (expected ISO-8601)") from exc
+
+    fallback_to_mock = _truthy(os.getenv("WEATHER_FALLBACK_TO_MOCK", "false"))
+    api_key = os.getenv("YANDEX_API_KEY")
+
+    try:
+        if not api_key:
+            if fallback_to_mock:
+                payload = generate_mock_weather(lat, lon, fetched_at_override)
+            else:
+                raise HTTPException(status_code=500, detail="YANDEX_API_KEY is missing")
+        else:
             payload = fetch_weather(lat, lon, api_key)
-            result = collection.insert_one(payload)
-            LOGGER.info(
-                "Stored weather snapshot _id=%s, temp=%s",
-                result.inserted_id,
-                payload.get("fact", {}).get("temp"),
-            )
-        except requests.HTTPError as exc:
-            LOGGER.error("Yandex Weather API error: status=%s body=%s", exc.response.status_code, exc.response.text)
-        except (requests.RequestException, PyMongoError) as exc:
-            LOGGER.exception("Transient error during ingestion: %s", exc)
-        except Exception as exc:  # pylint: disable=broad-except
-            LOGGER.exception("Unexpected failure: %s", exc)
+            if fetched_at_override:
+                payload["fetched_at"] = fetched_at_override
+        collection = get_mongo_collection()
+        result = collection.insert_one(payload)
+        return IngestResponse(
+            mongo_id=str(result.inserted_id),
+            fetched_at=str(payload.get("fetched_at")),
+            temperature_c=(payload.get("fact", {}) or {}).get("temp"),
+            source=str(payload.get("_source") or "yandex"),
+        )
+    except requests.HTTPError as exc:
+        if fallback_to_mock:
+            payload = generate_mock_weather(lat, lon, fetched_at_override)
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Yandex Weather API error: status={exc.response.status_code}",
+            ) from exc
+    except (requests.RequestException, PyMongoError) as exc:
+        LOGGER.exception("Ingestion failed: %s", exc)
+        if fallback_to_mock:
+            payload = generate_mock_weather(lat, lon, fetched_at_override)
+        else:
+            raise HTTPException(status_code=500, detail="Ingestion failed") from exc
 
-        for _ in range(interval):
-            if stopper.stop_requested:
-                break
-            time.sleep(1)
-
-    LOGGER.info("Weather ingestion service stopped")
-
-
-if __name__ == "__main__":
-    main()
+    # Fallback path: store synthetic payload
+    try:
+        collection = get_mongo_collection()
+        result = collection.insert_one(payload)
+        return IngestResponse(
+            mongo_id=str(result.inserted_id),
+            fetched_at=str(payload.get("fetched_at")),
+            temperature_c=(payload.get("fact", {}) or {}).get("temp"),
+            source=str(payload.get("_source") or "mock"),
+        )
+    except PyMongoError as exc:
+        LOGGER.exception("Mongo write failed during fallback: %s", exc)
+        raise HTTPException(status_code=500, detail="Mongo write failed") from exc

@@ -1,7 +1,7 @@
 {{
     config(
         materialized='incremental',
-        unique_key='observed_at',
+        unique_key='mongo_id',
         incremental_strategy='merge'
     )
 }}
@@ -11,6 +11,7 @@ with stg as (
 )
 
 select
+    mongo_id,
     observed_at,
     temperature_c,
     humidity,

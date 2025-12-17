@@ -11,15 +11,21 @@ models:
           config:
             severity: warn
     columns:
-      - name: observed_at
+      - name: mongo_id
         tests:
           - unique
+          - not_null
+      - name: observed_at
+        tests:
           - not_null
 
   - name: ods_weather_merge
     description: "Operational Data Store with incremental loading (merge)."
     columns:
-      - name: observed_at
+      - name: mongo_id
         tests:
           - unique
+          - not_null
+      - name: observed_at
+        tests:
           - not_null

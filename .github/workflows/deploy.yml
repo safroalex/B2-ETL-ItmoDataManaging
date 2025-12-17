@@ -51,5 +51,22 @@ jobs:
             docker compose logs --no-color --tail=200 airflow-init || true
             exit 1
           fi
-          docker compose logs --no-color --tail=50 airflow-init
+          echo "--- compose ps ---"
+          docker compose ps
+
+          echo "--- smoke checks (localhost) ---"
+          # Airflow UI (likely 200 or 302)
+          curl -fsSI http://localhost:8080/ | head -n 5
+          # Weather service
+          curl -fsS http://localhost:8000/health
+          echo
+          # Elementary report server (file will appear after DAG run)
+          curl -fsSI http://localhost:8081/ | head -n 5
+
+          echo "--- database checks ---"
+          docker compose exec -T postgres pg_isready -U airflow
+          docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })"
+
+          echo "--- airflow-init logs (tail) ---"
+          docker compose logs --no-color --tail=80 airflow-init
           EOF

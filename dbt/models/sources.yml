@@ -5,14 +5,12 @@ sources:
     database: analytics
     schema: public
     tables:
-      - name: weather_analytics
-        description: "Raw weather data loaded from MongoDB"
+      - name: weather_raw
+        description: "Raw MongoDB documents loaded into Postgres (EL landing table)"
         columns:
-          - name: observed_at
+          - name: mongo_id
             tests:
               - unique
               - not_null
-          - name: temperature_c
-          - name: humidity
-          - name: pressure_mm
-          - name: pressure_pa
+          - name: fetched_at
+          - name: payload

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List
 
+import requests
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
@@ -12,12 +14,21 @@ from airflow.utils.trigger_rule import TriggerRule
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
-DAG_ID = "etl_weather"
+DAG_ID = "el_weather"
 MONGO_CONN_ID = "mongo_weather"
 POSTGRES_CONN_ID = "postgres_weather"
 MONGO_COLLECTION = "weather_raw"
-TARGET_TABLE = "weather_analytics"
+TARGET_TABLE = "weather_raw"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
+WEATHER_SERVICE_URL = "http://weather-service:8000"
+
+
+def trigger_weather_ingest() -> Dict[str, Any]:
+    """Call the weather service once to generate a new MongoDB document."""
+
+    response = requests.post(f"{WEATHER_SERVICE_URL}/ingest", timeout=30)
+    response.raise_for_status()
+    return response.json()
 
 
 def extract_documents(**context: Any) -> List[Dict[str, Any]]:
@@ -36,87 +47,60 @@ def extract_documents(**context: Any) -> List[Dict[str, Any]]:
     return documents
 
 
-def transform_documents(ti: Any) -> List[Dict[str, Any]]:  # pylint: disable=invalid-name
-    """Trim large payload to only required analytical attributes."""
+def load_rows(ti: Any) -> None:  # pylint: disable=invalid-name
+    """Load raw JSON documents from MongoDB into PostgreSQL landing table (EL only)."""
 
     documents: List[Dict[str, Any]] = ti.xcom_pull(task_ids="extract_from_mongo") or []
-    transformed_rows: List[Dict[str, Any]] = []
-
-    for doc in documents:
-        fact = doc.get("fact", {})
-        fetched_at = doc.get("fetched_at")
-        if not fetched_at:
-            continue
-        transformed_rows.append(
-            {
-                "observed_at": datetime.fromisoformat(fetched_at),
-                "temperature_c": fact.get("temp"),
-                "humidity": fact.get("humidity"),
-                "pressure_mm": fact.get("pressure_mm"),
-                "pressure_pa": fact.get("pressure_pa"),
-            }
-        )
-    return transformed_rows
-
-
-def load_rows(ti: Any) -> None:  # pylint: disable=invalid-name
-    """Persist transformed snapshots into PostgreSQL fact table."""
-
-    rows: List[Dict[str, Any]] = ti.xcom_pull(task_ids="transform_weather") or []
-    if not rows:
+    if not documents:
         return
 
     pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
     insert_sql = f"""
         INSERT INTO {TARGET_TABLE} (
-            observed_at,
-            temperature_c,
-            humidity,
-            pressure_mm,
-            pressure_pa
-        ) VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (observed_at)
+            mongo_id,
+            fetched_at,
+            payload
+        ) VALUES (%s, %s, %s::jsonb)
+        ON CONFLICT (mongo_id)
         DO UPDATE SET
-            temperature_c = EXCLUDED.temperature_c,
-            humidity = EXCLUDED.humidity,
-            pressure_mm = EXCLUDED.pressure_mm,
-            pressure_pa = EXCLUDED.pressure_pa;
+            fetched_at = EXCLUDED.fetched_at,
+            payload = EXCLUDED.payload,
+            updated_at = NOW();
     """
 
-    for row in rows:
+    for doc in documents:
+        fetched_at_raw = doc.get("fetched_at")
+        if not fetched_at_raw:
+            continue
+        fetched_at = datetime.fromisoformat(str(fetched_at_raw))
+        mongo_id = str(doc.get("_id"))
         pg_hook.run(
             insert_sql,
-            parameters=(
-                row["observed_at"],
-                row.get("temperature_c"),
-                row.get("humidity"),
-                row.get("pressure_mm"),
-                row.get("pressure_pa"),
-            ),
+            parameters=(mongo_id, fetched_at, json.dumps(doc, ensure_ascii=False)),
         )
 
 
 def create_dag() -> DAG:
     with DAG(
         dag_id=DAG_ID,
-        description="Extract Mongo weather snapshots, trim, and load into Postgres",
+        description="EL pipeline: load raw Mongo JSON into Postgres, then transform via dbt",
         schedule_interval="@hourly",
         start_date=days_ago(1),
         catchup=False,
         max_active_runs=1,
         default_args={"owner": "data-platform"},
-        tags=["weather", "etl"],
+        tags=["weather", "el"],
     ) as dag:
         start = EmptyOperator(task_id="start")
+
+        ingest = PythonOperator(
+            task_id="trigger_weather_ingest",
+            python_callable=trigger_weather_ingest,
+        )
 
         extract = PythonOperator(
             task_id="extract_from_mongo",
             python_callable=extract_documents,
-        )
-
-        transform = PythonOperator(
-            task_id="transform_weather",
-            python_callable=transform_documents,
         )
 
         load = PythonOperator(
@@ -141,7 +125,7 @@ def create_dag() -> DAG:
 
         end = EmptyOperator(task_id="end", trigger_rule=TriggerRule.ALL_DONE)
 
-        start >> extract >> transform >> load >> dbt_run >> dbt_test >> edr_report >> end
+        start >> ingest >> extract >> load >> dbt_run >> dbt_test >> edr_report >> end
 
     return dag
 

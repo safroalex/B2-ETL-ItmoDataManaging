@@ -1,15 +1,15 @@
 ## Overview
 
-This repository contains Part One of the Itmo Data Managing course project: a production-ready ETL environment that continuously ingests current weather data from the Yandex Weather API, stores the raw payloads in MongoDB, and loads curated metrics into PostgreSQL via Apache Airflow. Docker Compose orchestrates every dependency so the system can be reproduced locally or on a remote server.
+This repository contains the Itmo Data Managing course project: a production-ready ELT environment where a Python **web service** fetches weather data from the Yandex Weather API and writes raw documents into MongoDB. Apache Airflow then (1) triggers the service on a schedule to generate load and (2) runs an **EL** pipeline that copies raw JSON documents from MongoDB into PostgreSQL. Data parsing/cleaning and analytics marts are done in PostgreSQL via dbt, with data quality monitoring via Elementary.
 
 ## Architecture
 
 | Component | Role |
 |-----------|------|
-| **Weather ingestion service** (`src/app.py`) | Polls the Yandex Weather API on a fixed cadence, enriches each payload with `fetched_at`, and writes documents into MongoDB.
+| **Weather ingestion service** (`src/app.py`) | HTTP service with Swagger (`/docs`) that fetches a single weather snapshot from Yandex Weather API and writes it into MongoDB.
 | **MongoDB** | Durable store for the raw weather snapshots (`weather.weather_raw` collection).
-| **PostgreSQL** | Hosts both the Airflow metadata database and the analytics schema (`analytics.weather_analytics`).
-| **Apache Airflow** | Runs on the LocalExecutor, orchestrating the hourly extract–transform–load pipeline and triggering dbt models.
+| **PostgreSQL** | Hosts both the Airflow metadata database and the analytics database. Raw docs are loaded into `analytics.public.weather_raw` (JSONB), then transformed by dbt.
+| **Apache Airflow** | Runs on the LocalExecutor, orchestrating (a) frequent load generation (calling the service) and (b) an hourly EL pipeline and dbt runs.
 | **dbt** | Transforms data in PostgreSQL (STG -> ODS -> DM) and runs data quality tests via Elementary.
 | **Docker Compose** | Spins up MongoDB, PostgreSQL, the Airflow components (init, scheduler, webserver), and the weather service in a single command.
 
@@ -21,8 +21,9 @@ This repository contains Part One of the Itmo Data Managing course project: a pr
 | `Dockerfile` | Builds the weather service image (Python 3.11, dependencies from `src/requirements.txt`). |
 | `Dockerfile.airflow` | Extends `apache/airflow:2.9.2-python3.11`, installs provider requirements, and runs as the `airflow` user. |
 | `airflow.env` | Provides UID/GID overrides so Airflow can write host-mounted logs. |
-| `dags/etl_weather.py` | Source of the Airflow DAG that moves data from MongoDB to PostgreSQL. |
-| `sql/weather_schema.sql` | Initializes the `analytics` database and the `weather_analytics` fact table with triggers. |
+| `dags/weather_ingest.py` | Airflow DAG that calls the weather service on a schedule (load generation). |
+| `dags/etl_weather.py` | Airflow DAG `el_weather` that copies raw Mongo JSON into Postgres and runs dbt + Elementary. |
+| `sql/weather_schema.sql` | Initializes the `analytics` database and the raw landing table `weather_raw` (JSONB) with triggers. |
 | `src/app.py` | Weather ingestion loop with graceful shutdown and structured logging. |
 | `requirements/airflow.txt` | Python packages baked into the Airflow image (Mongo + Postgres providers). |
 | `logs/.gitkeep` & `plugins/.gitkeep` | Empty placeholders so Airflow volume mounts resolve inside the containers. |
@@ -37,7 +38,7 @@ The project has been extended with **dbt** for data transformation and **Element
 The dbt project is configured to run against the PostgreSQL `analytics` database.
 
 - **Models**:
-  - `staging/stg_weather`: View over the raw `weather_analytics` table.
+   - `staging/stg_weather`: View over the raw `weather_raw` JSONB landing table.
   - `ods/ods_weather_incremental`: Incremental table using `delete+insert` strategy (standard incremental).
   - `ods/ods_weather_merge`: Incremental table using `merge` strategy (Postgres 15+).
   - `marts/dm_weather_daily`: Daily aggregation of weather metrics.
@@ -47,10 +48,9 @@ The dbt project is configured to run against the PostgreSQL `analytics` database
 
 ### Airflow Integration
 
-The `etl_weather` DAG now includes additional tasks:
-1. `dbt_run`: Executes `dbt run` to build/update models.
-2. `dbt_test`: Executes `dbt test` to run schema tests and Elementary monitors.
-3. `edr_report`: Generates the Elementary data quality report.
+Airflow runs two DAGs:
+1. `weather_ingest` (every 10 minutes): calls the weather service and writes a new document into MongoDB.
+2. `el_weather` (hourly): copies raw JSON documents from MongoDB into PostgreSQL and then runs dbt + tests + Elementary report.
 
 ### Elementary Dashboard
 
@@ -91,6 +91,7 @@ All defaults are suitable for local testing and can be overridden through Compos
    ```
 3. **Access the services**
    - Airflow UI: <http://localhost:8080> (user `admin`, password `admin`)
+   - Weather service Swagger: <http://localhost:8000/docs>
    - MongoDB: `mongodb://weather:weather@localhost:27017/weather?authSource=admin`
    - PostgreSQL analytics DB: `postgresql://airflow:airflow@localhost:5432/analytics`
 
@@ -98,26 +99,26 @@ Bootstrap actions (Airflow DB migration, admin user creation, connection setup, 
 
 ## Verifying the ETL Pipeline
 
-1. **Weather service** – tail logs with `docker compose logs -f weather-service` and ensure messages such as `Stored weather snapshot _id=...` appear every polling cycle.
+1. **Weather service** – open Swagger at <http://localhost:8000/docs> and call `POST /ingest` (or rely on the `weather_ingest` DAG).
 2. **MongoDB raw layer** – check document growth:
    ```bash
    docker compose exec mongodb \
      mongosh --quiet --username weather --password weather --authenticationDatabase admin \
      --eval "db.getSiblingDB('weather').weather_raw.countDocuments()"
    ```
-3. **Airflow DAG availability** – open the Airflow UI, confirm `etl_weather` is in the DAG list, and unpause it (or run `docker compose exec airflow-scheduler airflow dags unpause etl_weather`).
+3. **Airflow DAG availability** – open the Airflow UI, confirm `weather_ingest` and `el_weather` are in the DAG list, and unpause them.
 4. **Manual validation run** – trigger the DAG via the UI or CLI:
    ```bash
-   docker compose exec airflow-scheduler airflow dags trigger etl_weather
+   docker compose exec airflow-scheduler airflow dags trigger el_weather
    ```
-   Monitor task logs to ensure `extract_from_mongo`, `transform_weather`, and `load_postgres` all reach `success`.
+   Monitor task logs to ensure `extract_from_mongo` and `load_postgres` reach `success`.
 5. **Analytics output** – query PostgreSQL to confirm new rows:
    ```bash
    docker compose exec postgres \
      psql -U airflow -d analytics \
-     -c "SELECT * FROM weather_analytics ORDER BY observed_at DESC LIMIT 5;"
+     -c "SELECT * FROM weather_raw ORDER BY fetched_at DESC LIMIT 5;"
    ```
-   Timestamps and metrics should line up with the raw Mongo documents from step 2.
+   Raw JSON should be present in `payload`.
 6. **DBT Models** – check the created tables in Postgres:
    ```bash
    docker compose exec postgres \
@@ -164,3 +165,16 @@ Before enabling the workflow, provision the deployment user and SSH keys as desc
 - Store the Yandex API key and Airflow credentials outside the repository (Compose `.env`, Docker secrets, Vault, etc.).
 - Rotate credentials regularly and change the default Airflow admin password before exposing the UI beyond localhost.
 - Restrict ingress to MongoDB and PostgreSQL when deploying in shared or cloud environments.
+
+## Required Artifact URLs
+
+Fill these in for the deployed server (examples assume host `62.60.228.129`):
+
+- Swagger URL: http://62.60.228.129:8000/docs
+- MongoDB URL: mongodb://weather:weather@62.60.228.129:27017/weather?authSource=admin
+- PostgreSQL URL: postgresql://airflow:airflow@62.60.228.129:5432/analytics
+- Airflow:
+   - URL: http://62.60.228.129:8080/home
+   - User: admin
+   - Password: admin
+- Elementary edr report URL: http://62.60.228.129:8081/elementary_report.html

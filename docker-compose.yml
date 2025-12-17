@@ -84,13 +84,40 @@ services:
         airflow connections add 'mongo_weather' --conn-type mongo --conn-host mongodb --conn-port 27017 --conn-login weather --conn-password weather --conn-schema weather --conn-extra '{"authSource": "admin"}'
         airflow connections delete 'postgres_weather' || true
         airflow connections add 'postgres_weather' --conn-type postgres --conn-host postgres --conn-port 5432 --conn-login airflow --conn-password airflow --conn-schema analytics --conn-extra '{"sslmode": "disable"}'
-        airflow variables set WEATHER_TARGET_TABLE weather_analytics
+        airflow variables set WEATHER_TARGET_TABLE weather_raw
+
+        # Ensure EL landing table exists (needed if Postgres volume already existed)
+        python - <<'PY'
+        import psycopg2
+
+        conn = psycopg2.connect(
+          host="postgres",
+          port=5432,
+          user="airflow",
+          password="airflow",
+          dbname="analytics",
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+          """
+          CREATE TABLE IF NOT EXISTS weather_raw (
+            mongo_id TEXT PRIMARY KEY,
+            fetched_at TIMESTAMPTZ NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+          """
+        )
+        cur.close()
+        conn.close()
+        PY
         
         # Initialize DBT and Elementary
         if [ -d "/opt/airflow/dbt" ]; then
           cd /opt/airflow/dbt
           dbt deps
-          dbt run-operation elementary.install_schema || true
         fi
     healthcheck:
       test: ["CMD", "airflow", "db", "check"]
@@ -128,6 +155,8 @@ services:
       dockerfile: Dockerfile
     container_name: weather-service
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     environment:
       MONGO_URI: mongodb://weather:weather@mongodb:27017
       MONGO_DB: weather
@@ -135,7 +164,7 @@ services:
       YANDEX_API_KEY: 4b58efb3-3711-4760-b6e3-377eba3ab46a
       WEATHER_LAT: "55.75"
       WEATHER_LON: "37.61"
-      POLLING_INTERVAL_SECONDS: "600"
+      WEATHER_FALLBACK_TO_MOCK: "true"
       LOG_LEVEL: INFO
     depends_on:
       mongodb:
