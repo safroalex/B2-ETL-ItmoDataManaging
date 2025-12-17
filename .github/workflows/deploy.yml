@@ -61,12 +61,50 @@ jobs:
           docker compose ps
 
           echo "--- smoke checks (localhost) ---"
-          # Airflow UI (likely 200 or 302)
-          curl -fsSI http://localhost:8080/ | head -n 5
+          # Helpers
+          retry() {
+            local name="$1"; shift
+            local attempts="${1:-30}"; shift
+            local sleep_s="${1:-2}"; shift
+            local n=1
+            while true; do
+              if "$@"; then
+                echo "OK: $name"
+                return 0
+              fi
+              if [ "$n" -ge "$attempts" ]; then
+                echo "FAIL: $name (after ${attempts} attempts)" >&2
+                return 1
+              fi
+              n=$((n+1))
+              sleep "$sleep_s"
+            done
+          }
+
+          dump_logs() {
+            echo "--- airflow-webserver logs (tail) ---" || true
+            docker compose logs --no-color --tail=120 airflow-webserver || true
+            echo "--- airflow-scheduler logs (tail) ---" || true
+            docker compose logs --no-color --tail=120 airflow-scheduler || true
+            echo "--- weather-service logs (tail) ---" || true
+            docker compose logs --no-color --tail=120 weather-service || true
+            echo "--- elementary-report logs (tail) ---" || true
+            docker compose logs --no-color --tail=120 elementary-report || true
+          }
+
+          # Airflow webserver can take time to start; use the /health endpoint
+          retry "airflow /health" 40 3 curl -fsS http://localhost:8080/health >/dev/null || { dump_logs; exit 1; }
+
           # Weather service
+          retry "weather-service /health" 20 2 curl -fsS http://localhost:8000/health >/dev/null || { dump_logs; exit 1; }
+
+          # Elementary report server (index should respond; report file appears after DAG run)
+          retry "elementary-report port" 20 2 curl -fsSI http://localhost:8081/ >/dev/null || { dump_logs; exit 1; }
+
+          # If we reached here, all ports/endpoints are up
+          curl -fsSI http://localhost:8080/health | head -n 5
           curl -fsS http://localhost:8000/health
           echo
-          # Elementary report server (file will appear after DAG run)
           curl -fsSI http://localhost:8081/ | head -n 5
 
           echo "--- database checks ---"
