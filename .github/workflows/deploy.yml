@@ -40,6 +40,9 @@ jobs:
           rm /tmp/b2-etl-release.tar.gz
           cd "$DEPLOY_PATH"
 
+          # Ensure report output directory exists on the host for the elementary-report container
+          mkdir -p dbt/target
+
           # Stop running containers before touching bind-mounted folders
           docker compose down || true
 
@@ -116,10 +119,10 @@ jobs:
           docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest || true
           docker compose exec -T airflow-scheduler airflow dags unpause el_weather || true
 
-          # For @hourly EL DAG: choose exec-date = next UTC hour so interval covers current hour
+          # For @hourly EL DAG: use the current UTC hour as logical date.
+          # IMPORTANT: future logical dates stay queued until their time comes.
           CUR_HOUR_UTC="$(date -u +"%Y-%m-%dT%H:00:00+00:00")"
-          NEXT_HOUR_UTC="$(date -u -d "+1 hour" +"%Y-%m-%dT%H:00:00+00:00")"
-          echo "Using CUR_HOUR_UTC=$CUR_HOUR_UTC NEXT_HOUR_UTC=$NEXT_HOUR_UTC"
+          echo "Using CUR_HOUR_UTC=$CUR_HOUR_UTC"
 
           wait_dag_run() {
             local dag_id="$1"
@@ -149,20 +152,19 @@ jobs:
             done
           }
 
-          # Run a couple of cycles so the report is definitely generated/updated
+          # Generate a bit of data, then run EL once for the current hour to build dbt + Elementary report.
+          TS="$(date -u +"%Y%m%dT%H%M%SZ")"
           for i in 1 2; do
-            TS="$(date -u +"%Y%m%dT%H%M%SZ")"
             INGEST_RUN_ID="postdeploy_weather_ingest_${TS}_${i}"
-            EL_RUN_ID="postdeploy_el_weather_${TS}_${i}"
-
             echo "Triggering weather_ingest run_id=$INGEST_RUN_ID"
             docker compose exec -T airflow-scheduler airflow dags trigger weather_ingest --run-id "$INGEST_RUN_ID"
             wait_dag_run weather_ingest "$INGEST_RUN_ID" 300 || { dump_logs; exit 1; }
-
-            echo "Triggering el_weather exec_date=$NEXT_HOUR_UTC run_id=$EL_RUN_ID"
-            docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$NEXT_HOUR_UTC" --run-id "$EL_RUN_ID"
-            wait_dag_run el_weather "$EL_RUN_ID" 1800 || { dump_logs; exit 1; }
           done
+
+          EL_RUN_ID="postdeploy_el_weather_${TS}"
+          echo "Triggering el_weather exec_date=$CUR_HOUR_UTC run_id=$EL_RUN_ID"
+          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_HOUR_UTC" --run-id "$EL_RUN_ID"
+          wait_dag_run el_weather "$EL_RUN_ID" 1800 || { dump_logs; exit 1; }
 
           echo "--- verify outputs ---"
           docker compose exec -T postgres psql -U airflow -d analytics -c "SELECT count(*) AS weather_raw_rows FROM weather_raw;" | cat
@@ -174,7 +176,17 @@ jobs:
           fi
 
           # Verify Elementary report is served (file appears after edr_report task)
-          retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
+          echo "--- dbt target directory (host + airflow container) ---"
+          ls -la dbt/target | head -n 50 || true
+          docker compose exec -T airflow-scheduler bash -lc "ls -la /opt/airflow/dbt/target | head -n 50" || true
+
+          # Verify Elementary report is served (file appears after edr_report task)
+          if ! retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null; then
+            echo "Report not served yet; attempting direct report generation as fallback" >&2
+            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." || true
+            ls -la dbt/target | head -n 50 || true
+            retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
+          fi
           echo "Elementary report is available at http://<host>:8081/elementary_report.html"
 
           echo "--- airflow-init logs (tail) ---"
