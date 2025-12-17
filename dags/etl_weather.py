@@ -9,10 +9,10 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
-from airflow.utils.trigger_rule import TriggerRule
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.utils.dates import days_ago
+from airflow.utils.trigger_rule import TriggerRule
 
 DAG_ID = "el_weather"
 MONGO_CONN_ID = "mongo_weather"
@@ -34,6 +34,8 @@ def trigger_weather_ingest() -> Dict[str, Any]:
 def extract_documents(**context: Any) -> List[Dict[str, Any]]:
     """Pull raw weather snapshots for the scheduled interval from MongoDB."""
 
+    # Airflow schedules DAG runs using a logical data interval; we must query Mongo by that window
+    # to keep EL idempotent and reproducible.
     interval_start = context["data_interval_start"].to_iso8601_string()  # type: ignore[attr-defined]
     interval_end = context["data_interval_end"].to_iso8601_string()  # type: ignore[attr-defined]
 
@@ -67,6 +69,8 @@ def load_rows(ti: Any) -> None:  # pylint: disable=invalid-name
             payload = EXCLUDED.payload,
             updated_at = NOW();
     """
+
+    # Upsert-by-mongo_id makes repeated DAG runs safe (retries/backfills won't duplicate rows).
 
     for doc in documents:
         fetched_at_raw = doc.get("fetched_at")
@@ -110,6 +114,7 @@ def create_dag() -> DAG:
 
         dbt_run = BashOperator(
             task_id="dbt_run",
+            # Keep transformations in dbt (EL pipeline): Python only loads raw JSON into Postgres.
             bash_command=f"cd {DBT_PROJECT_DIR} && dbt deps && dbt run --select elementary --full-refresh && dbt run",
         )
 
@@ -120,6 +125,7 @@ def create_dag() -> DAG:
 
         edr_report = BashOperator(
             task_id="edr_report",
+            # HTML report is written into /opt/airflow/dbt/target and served by the elementary-report container.
             bash_command=f"cd {DBT_PROJECT_DIR} && edr report --file-path /opt/airflow/dbt/target/elementary_report.html --profiles-dir .",
         )
 

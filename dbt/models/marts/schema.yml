@@ -1,8 +1,9 @@
 version: 2
-
 models:
   - name: dm_weather_daily
     description: "Daily aggregated weather metrics."
+    config:
+      tags: [weather, dm]
     columns:
       - name: date_day
         description: "Date of the aggregation"
@@ -13,7 +14,19 @@ models:
         description: "Average daily temperature"
         tests:
           - valid_temperature
+      - name: min_temperature_c
+        description: "Minimum daily temperature"
+        tests:
+          - valid_temperature
+      - name: max_temperature_c
+        description: "Maximum daily temperature"
+        tests:
+          - valid_temperature
+      - name: avg_humidity
+        description: "Average daily humidity (%)"
       - name: observations_count
         description: "Number of observations per day"
         tests:
           - not_null
+      - name: avg_temperature_7d
+        description: "Rolling 7-day average of avg_temperature_c (window function over date_day)"

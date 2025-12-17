@@ -1,31 +1,82 @@
 version: 2
-
 models:
   - name: ods_weather_incremental
     description: "Operational Data Store with incremental loading (delete+insert)."
     config:
+      tags: [weather, ods, incremental]
       elementary:
         timestamp_column: observed_at
     tests:
       - elementary.volume_anomalies:
           config:
             severity: warn
+      - elementary.freshness_anomalies:
+          config:
+            severity: warn
+            days_back: 2
+      - elementary.event_freshness_anomalies:
+          arguments:
+            event_timestamp_column: observed_at
+          config:
+            severity: warn
+            max_age_seconds: 7200
+      - elementary.column_anomalies:
+          column_name: temperature_c
+          config:
+            severity: warn
+      - elementary.all_columns_anomalies:
+          config:
+            severity: warn
+      - elementary.dimension_anomalies:
+          arguments:
+            dimensions: [source_system]
+          config:
+            severity: warn
     columns:
       - name: mongo_id
+        description: "MongoDB document id (business key)"
         tests:
           - unique
           - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_weather')
+                field: mongo_id
       - name: observed_at
+        description: "Event timestamp (when weather was fetched)"
         tests:
           - not_null
-
+      - name: source_system
+        description: "Data source identifier (yandex/mock)"
+      - name: temperature_c
+        description: "Air temperature in Celsius"
+      - name: humidity
+        description: "Relative humidity (%)"
+      - name: pressure_mm
+        description: "Atmospheric pressure (mmHg)"
+      - name: pressure_pa
+        description: "Atmospheric pressure (Pa)"
+      - name: loaded_at
+        description: "When this row was loaded into Postgres landing"
+      - name: dbt_updated_at
+        description: "dbt processing timestamp"
   - name: ods_weather_merge
     description: "Operational Data Store with incremental loading (merge)."
+    config:
+      tags: [weather, ods, merge]
     columns:
       - name: mongo_id
+        description: "MongoDB document id (business key)"
         tests:
           - unique
           - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_weather')
+                field: mongo_id
       - name: observed_at
+        description: "Event timestamp (when weather was fetched)"
         tests:
           - not_null
+      - name: source_system
+        description: "Data source identifier (yandex/mock)"

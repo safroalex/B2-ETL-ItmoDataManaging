@@ -1,180 +1,117 @@
-## Overview
+# Weather EL (Airflow + dbt + Elementary)
 
-This repository contains the Itmo Data Managing course project: a production-ready ELT environment where a Python **web service** fetches weather data from the Yandex Weather API and writes raw documents into MongoDB. Apache Airflow then (1) triggers the service on a schedule to generate load and (2) runs an **EL** pipeline that copies raw JSON documents from MongoDB into PostgreSQL. Data parsing/cleaning and analytics marts are done in PostgreSQL via dbt, with data quality monitoring via Elementary.
+Production-style EL pipeline for the ITMO “Data Managing” course.
 
-## Architecture
+- Python web service (FastAPI) stores **raw JSON** snapshots in MongoDB.
+- Airflow generates load and runs an **EL** pipeline: Mongo → Postgres landing JSONB.
+- dbt does parsing + transformations in SQL (STG → ODS → DM).
+- Elementary runs observability tests + generates an HTML report.
 
-| Component | Role |
-|-----------|------|
-| **Weather ingestion service** (`src/app.py`) | HTTP service with Swagger (`/docs`) that fetches a single weather snapshot from Yandex Weather API and writes it into MongoDB.
-| **MongoDB** | Durable store for the raw weather snapshots (`weather.weather_raw` collection).
-| **PostgreSQL** | Hosts both the Airflow metadata database and the analytics database. Raw docs are loaded into `analytics.public.weather_raw` (JSONB), then transformed by dbt.
-| **Apache Airflow** | Runs on the LocalExecutor, orchestrating (a) frequent load generation (calling the service) and (b) an hourly EL pipeline and dbt runs.
-| **dbt** | Transforms data in PostgreSQL (STG -> ODS -> DM) and runs data quality tests via Elementary.
-| **Docker Compose** | Spins up MongoDB, PostgreSQL, the Airflow components (init, scheduler, webserver), and the weather service in a single command.
+## URLs (local)
 
-## Repository Artifacts
+- Airflow UI: http://localhost:8080 (admin/admin)
+- Weather service Swagger: http://localhost:8000/docs
+- Elementary report: http://localhost:8081/elementary_report.html
 
-| Path | Description |
-|------|-------------|
-| `docker-compose.yml` | Defines every container, shared networks, and bootstrap workflow (Airflow init, scheduler, webserver, weather service). |
-| `Dockerfile` | Builds the weather service image (Python 3.11, dependencies from `src/requirements.txt`). |
-| `Dockerfile.airflow` | Extends `apache/airflow:2.9.2-python3.11`, installs provider requirements, and runs as the `airflow` user. |
-| `airflow.env` | Provides UID/GID overrides so Airflow can write host-mounted logs. |
-| `dags/weather_ingest.py` | Airflow DAG that calls the weather service on a schedule (load generation). |
-| `dags/etl_weather.py` | Airflow DAG `el_weather` that copies raw Mongo JSON into Postgres and runs dbt + Elementary. |
-| `sql/weather_schema.sql` | Initializes the `analytics` database and the raw landing table `weather_raw` (JSONB) with triggers. |
-| `src/app.py` | Weather ingestion loop with graceful shutdown and structured logging. |
-| `requirements/airflow.txt` | Python packages baked into the Airflow image (Mongo + Postgres providers). |
-| `logs/.gitkeep` & `plugins/.gitkeep` | Empty placeholders so Airflow volume mounts resolve inside the containers. |
-| `dbt/` | Contains the dbt project (models, profiles, tests) for data transformation and quality monitoring. |
+## Quickstart
 
-## Part 2: DBT & Elementary Integration
+```bash
+docker compose up -d --build
+```
 
-The project has been extended with **dbt** for data transformation and **Elementary** for data observability.
+Then unpause and run the pipeline:
 
-### DBT Project Structure (`dbt/`)
+```bash
+docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest
+docker compose exec -T airflow-scheduler airflow dags unpause el_weather
+docker compose exec -T airflow-scheduler airflow dags trigger el_weather
+```
 
-The dbt project is configured to run against the PostgreSQL `analytics` database.
+## Proof links (rubric checklist)
 
-- **Models**:
-   - `staging/stg_weather`: View over the raw `weather_raw` JSONB landing table.
-  - `ods/ods_weather_incremental`: Incremental table using `delete+insert` strategy (standard incremental).
-  - `ods/ods_weather_merge`: Incremental table using `merge` strategy (Postgres 15+).
-  - `marts/dm_weather_daily`: Daily aggregation of weather metrics.
-- **Tests**:
-  - Basic schema tests (unique, not null) defined in `sources.yml`.
-  - Elementary data quality monitoring enabled via `packages.yml`.
+Each requirement below links to the exact code/config section where it is implemented.
 
-### Airflow Integration
+### 1) Python web service (no infinite loop) + Swagger
 
-Airflow runs two DAGs:
-1. `weather_ingest` (every 10 minutes): calls the weather service and writes a new document into MongoDB.
-2. `el_weather` (hourly): copies raw JSON documents from MongoDB into PostgreSQL and then runs dbt + tests + Elementary report.
+- Service is FastAPI (HTTP endpoints, not a `while True` loop): [src/app.py#L1-L6](src/app.py#L1-L6), [src/app.py#L92-L128](src/app.py#L92-L128)
+- Health endpoint (for readiness checks): [src/app.py#L122-L125](src/app.py#L122-L125)
+- Ingest endpoint that writes to Mongo: [src/app.py#L127-L189](src/app.py#L127-L189)
+- Container entrypoint runs `uvicorn`: [Dockerfile#L18-L20](Dockerfile#L18-L20)
 
-### Elementary Dashboard
+### 2) MongoDB used as raw storage
 
-The project includes a lightweight server to view the Elementary data quality report.
-After the DAG runs successfully (specifically the `edr_report` task), you can access the dashboard at:
+- Mongo container + credentials: [docker-compose.yml#L33-L46](docker-compose.yml#L33-L46)
+- Service connects to Mongo (envs): [docker-compose.yml#L144-L165](docker-compose.yml#L144-L165)
+- Mongo write (insert raw payload): [src/app.py#L155-L163](src/app.py#L155-L163)
 
-**<http://localhost:8081/elementary_report.html>**
+### 3) Airflow orchestration (generation + EL pipeline)
 
-This report provides a visual interface for test results, data lineage, and anomaly detection.
+- Load generation DAG (calls the service on schedule): [dags/weather_ingest.py#L21-L40](dags/weather_ingest.py#L21-L40)
+- EL DAG (Mongo → Postgres landing, then dbt + tests + report): [dags/etl_weather.py#L87-L135](dags/etl_weather.py#L87-L135)
+- Interval-based extraction (idempotent by Airflow data interval): [dags/etl_weather.py#L34-L49](dags/etl_weather.py#L34-L49)
 
-## Local Prerequisites
+### 4) PostgreSQL landing table (JSONB) + EL (raw JSON only)
 
-- Docker Desktop 4.x (or Docker Engine 24+ plus the Compose plugin)
-- Open TCP ports 27017 (MongoDB), 5432 (PostgreSQL), and 8080 (Airflow UI)
-- Outbound HTTPS access to `api.weather.yandex.ru`
+- Landing table DDL (`payload JSONB`): [sql/weather_schema.sql#L4-L10](sql/weather_schema.sql#L4-L10)
+- Upsert of raw JSON into Postgres (no parsing in Python): [dags/etl_weather.py#L52-L85](dags/etl_weather.py#L52-L85)
+- Airflow init also ensures landing table exists (idempotent bootstrap): [docker-compose.yml#L84-L110](docker-compose.yml#L84-L110)
 
-## Configuration
+### 5) dbt transformations (SQL) + layered models (STG/ODS/DM)
 
-All defaults are suitable for local testing and can be overridden through Compose environment variables or a `.env` file when needed.
+- Source definition for the landing table: [dbt/models/sources.yml#L1-L22](dbt/models/sources.yml#L1-L22)
+- STG parses JSONB into typed columns: [dbt/models/staging/stg_weather.sql#L1-L12](dbt/models/staging/stg_weather.sql#L1-L12)
+- ODS incremental #1 (standard incremental): [dbt/models/ods/ods_weather_incremental.sql#L1-L26](dbt/models/ods/ods_weather_incremental.sql#L1-L26)
+- ODS incremental #2 (merge strategy): [dbt/models/ods/ods_weather_merge.sql#L1-L26](dbt/models/ods/ods_weather_merge.sql#L1-L26)
+- DM mart with CTE + window function: [dbt/models/marts/dm_weather_daily.sql#L7-L32](dbt/models/marts/dm_weather_daily.sql#L7-L32)
+- dbt project schemas per layer: [dbt/dbt_project.yml#L17-L27](dbt/dbt_project.yml#L17-L27)
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `YANDEX_API_KEY` | Provided demo key | Replace with your personal key before public deployment. |
-| `POLLING_INTERVAL_SECONDS` | `600` | Sets the weather service polling loop. |
-| `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION` | Point to the bundled MongoDB | Keep aligned with Airflow connection `mongo_weather`. |
-| `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` | PostgreSQL DSN | Configured for the co-located PostgreSQL container. |
-| Airflow connections | Created by `airflow-init` | `mongo_weather` uses `authSource=admin`; `postgres_weather` targets the analytics schema. |
+### 6) Data quality: dbt tests (4 types) + custom test
 
-## Running the Stack Locally
+- `unique` / `not_null` / `relationships` / `accepted_values`: [dbt/models/staging/schema.yml#L8-L33](dbt/models/staging/schema.yml#L8-L33)
+- Custom generic test `valid_temperature`: [dbt/tests/generic/test_valid_temperature.sql#L1-L3](dbt/tests/generic/test_valid_temperature.sql#L1-L3)
+- Custom test used in DM schema: [dbt/models/marts/schema.yml#L13-L32](dbt/models/marts/schema.yml#L13-L32)
 
-1. **Build and start**
-   ```bash
-   docker compose up --build -d
-   ```
-2. **Confirm container health**
-   ```bash
-   docker compose ps
-   ```
-3. **Access the services**
-   - Airflow UI: <http://localhost:8080> (user `admin`, password `admin`)
-   - Weather service Swagger: <http://localhost:8000/docs>
-   - MongoDB: `mongodb://weather:weather@localhost:27017/weather?authSource=admin`
-   - PostgreSQL analytics DB: `postgresql://airflow:airflow@localhost:5432/analytics`
+### 7) Elementary (6 types of monitors) + HTML report
 
-Bootstrap actions (Airflow DB migration, admin user creation, connection setup, and analytics schema provisioning) happen automatically during the `airflow-init` run.
+- Elementary package installed: [dbt/packages.yml#L1-L3](dbt/packages.yml#L1-L3)
+- ODS model includes 6 Elementary tests (volume/freshness/event_freshness/column/all_columns/dimension anomalies): [dbt/models/ods/schema.yml#L3-L35](dbt/models/ods/schema.yml#L3-L35)
+- Airflow task generates report via `edr report`: [dags/etl_weather.py#L126-L130](dags/etl_weather.py#L126-L130)
+- Report is served from `dbt/target` by a lightweight HTTP server container: [docker-compose.yml#L166-L175](docker-compose.yml#L166-L175)
 
-## Verifying the ETL Pipeline
+### 8) Notebook + exported artifact
 
-1. **Weather service** – open Swagger at <http://localhost:8000/docs> and call `POST /ingest` (or rely on the `weather_ingest` DAG).
-2. **MongoDB raw layer** – check document growth:
-   ```bash
-   docker compose exec mongodb \
-     mongosh --quiet --username weather --password weather --authenticationDatabase admin \
-     --eval "db.getSiblingDB('weather').weather_raw.countDocuments()"
-   ```
-3. **Airflow DAG availability** – open the Airflow UI, confirm `weather_ingest` and `el_weather` are in the DAG list, and unpause them.
-4. **Manual validation run** – trigger the DAG via the UI or CLI:
-   ```bash
-   docker compose exec airflow-scheduler airflow dags trigger el_weather
-   ```
-   Monitor task logs to ensure `extract_from_mongo` and `load_postgres` reach `success`.
-5. **Analytics output** – query PostgreSQL to confirm new rows:
-   ```bash
-   docker compose exec postgres \
-     psql -U airflow -d analytics \
-     -c "SELECT * FROM weather_raw ORDER BY fetched_at DESC LIMIT 5;"
-   ```
-   Raw JSON should be present in `payload`.
-6. **DBT Models** – check the created tables in Postgres:
-   ```bash
-   docker compose exec postgres \
-     psql -U airflow -d analytics \
-     -c "SELECT table_name FROM information_schema.tables WHERE table_schema IN ('dbt_stg', 'dbt_ods', 'dbt_dm');"
-   ```
-   You should see `stg_weather`, `ods_weather_incremental`, `ods_weather_merge`, and `dm_weather_daily`.
+- Notebook: [notebooks/weather_mart_insights.ipynb](notebooks/weather_mart_insights.ipynb)
+- HTML export (committed artifact): [notebooks/weather_mart_insights.html](notebooks/weather_mart_insights.html)
+- Export command documented: [notebooks/README.md#L16-L20](notebooks/README.md#L16-L20)
 
-7. **Elementary Reports** – Elementary tables are created in the `dbt_elementary` schema (or similar, depending on config). You can check for test results:
-   ```bash
-   docker compose exec postgres \
-     psql -U airflow -d analytics \
-     -c "SELECT count(*) FROM dbt_elementary.elementary_test_results;"
-   ```
+### 9) Presentation artifact (committed) + reproducible generator
 
-Once the DAG is unpaused, the scheduler continues to execute it hourly without manual intervention.
+- Presentation deck source: [presentation/presentation.md](presentation/presentation.md)
+- Generated presentation artifact: [presentation/presentation.pptx](presentation/presentation.pptx)
+- Generator script (reproducible build): [scripts/generate_presentation_pptx.py#L1-L101](scripts/generate_presentation_pptx.py#L1-L101)
 
-## Deploying on a Server
+### 10) Code quality tooling + CI
 
-1. Install Docker Engine + Compose on the target host and clone this repository.
-2. Set environment-specific secrets (API key, Airflow admin password) via `.env` or a secrets manager.
-3. Adjust published ports or attach the containers to existing networks if necessary.
-4. Launch the stack with `docker compose up -d --build` and expose the Airflow UI through HTTPS with authentication (VPN, reverse proxy, or security groups).
-5. Point monitoring/alerting at the Airflow scheduler logs and database health checks.
+- pre-commit hooks (ruff + formatting + sqlfmt for dbt SQL): [.pre-commit-config.yaml#L1-L26](.pre-commit-config.yaml#L1-L26)
+- CI runs pre-commit on push/PR: [.github/workflows/ci.yml#L1-L24](.github/workflows/ci.yml#L1-L24)
 
-### GitHub Actions deployment pipeline
+### 11) CI/CD deploy pipeline (GitHub Actions)
 
-- Workflow: `.github/workflows/deploy.yml` (runs on pushes to `main` or `feature/partOne` and on manual dispatch).
-- Secrets required: `DEPLOY_SSH_KEY` – private key for the `cybrex@213.165.34.52` account.
-- Remote path: `/opt/b2-etl-itmodata` (created automatically if missing).
-- Behavior: packs the repository, securely copies it to the server, and runs `docker compose down && docker compose up -d --build` to refresh the stack.
+- Auto-deploy workflow (bundle → remote `docker compose up -d --build` + smoke checks + post-deploy DAG runs): [.github/workflows/deploy.yml#L1-L220](.github/workflows/deploy.yml#L1-L220)
 
-Before enabling the workflow, provision the deployment user and SSH keys as described in `docs/server_setup.md`.
+### 12) “No push to main” requirement (repo setting)
 
-## Operations & Troubleshooting
+This is enforced in Git hosting settings (not in code).
 
-- Weather service logs: `docker compose logs -f weather-service`
-- Airflow scheduler & DAG logs: `docker compose logs -f airflow-scheduler`
-- Re-run the initialization bootstrap (connections, DB migrations, variables): `docker compose run --rm airflow-init`
-- Reset the environment completely (including Mongo/Postgres volumes): `docker compose down -v`
+- Enable **Branch protection** for `main` (require PR, disallow direct pushes).
+- CI check to require before merge: [.github/workflows/ci.yml#L1-L24](.github/workflows/ci.yml#L1-L24)
 
-## Security Notes
+## Connection strings (local)
 
-- Store the Yandex API key and Airflow credentials outside the repository (Compose `.env`, Docker secrets, Vault, etc.).
-- Rotate credentials regularly and change the default Airflow admin password before exposing the UI beyond localhost.
-- Restrict ingress to MongoDB and PostgreSQL when deploying in shared or cloud environments.
+- MongoDB: `mongodb://weather:weather@localhost:27017/weather?authSource=admin`
+- Postgres analytics DB: `postgresql://airflow:airflow@localhost:5432/analytics`
 
-## Required Artifact URLs
+## Notes
 
-Fill these in for the deployed server (examples assume host `62.60.228.129`):
-
-- Swagger URL: http://62.60.228.129:8000/docs
-- MongoDB URL: mongodb://weather:weather@62.60.228.129:27017/weather?authSource=admin
-- PostgreSQL URL: postgresql://airflow:airflow@62.60.228.129:5432/analytics
-- Airflow:
-   - URL: http://62.60.228.129:8080/home
-   - User: admin
-   - Password: admin
-- Elementary edr report URL: http://62.60.228.129:8081/elementary_report.html
+- dbt docs/commands and structure are described in [dbt/README.md](dbt/README.md).
+- If you want fully reproducible deployed URLs, replace `localhost` with your server IP/host.

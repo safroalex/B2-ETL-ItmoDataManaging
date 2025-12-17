@@ -1,8 +1,15 @@
+"""Weather ingestion microservice.
+
+This service fetches weather snapshots (Yandex Weather API or mock fallback) and
+stores raw JSON payloads in MongoDB. Downstream EL/analytics are handled by
+Airflow + dbt (Postgres landing JSONB -> STG/ODS/DM).
+"""
+
 import json
 import logging
 import os
-from datetime import datetime, timezone
 import random
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import requests
@@ -22,6 +29,11 @@ YA_API_URL = "https://api.weather.yandex.ru/v2/forecast"
 
 
 def get_mongo_collection() -> Collection:
+    """Return MongoDB collection used for raw weather payloads.
+
+    Creates an index on `fetched_at` to speed up interval-based extraction in
+    Airflow.
+    """
     mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
     mongo_db = os.getenv("MONGO_DB", "weather")
     mongo_collection = os.getenv("MONGO_COLLECTION", "weather_raw")
@@ -46,6 +58,7 @@ def build_request(lat: str, lon: str, api_key: str) -> Dict[str, Any]:
 
 
 def fetch_weather(lat: str, lon: str, api_key: str) -> Dict[str, Any]:
+    """Fetch a single weather snapshot from Yandex Weather API."""
     request_spec = build_request(lat, lon, api_key)
     LOGGER.debug("Requesting weather: %s", json.dumps(request_spec["params"]))
     response = requests.get(
@@ -125,6 +138,7 @@ def ingest(body: IngestRequest | None = None) -> IngestResponse:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid fetched_at (expected ISO-8601)") from exc
 
+    # This fallback makes the project demo-friendly even without a real API key.
     fallback_to_mock = _truthy(os.getenv("WEATHER_FALLBACK_TO_MOCK", "false"))
     api_key = os.getenv("YANDEX_API_KEY")
 
@@ -138,6 +152,7 @@ def ingest(body: IngestRequest | None = None) -> IngestResponse:
             payload = fetch_weather(lat, lon, api_key)
             if fetched_at_override:
                 payload["fetched_at"] = fetched_at_override
+        # Store raw payload as-is (EL pattern). Parsing/analytics happen in dbt.
         collection = get_mongo_collection()
         result = collection.insert_one(payload)
         return IngestResponse(

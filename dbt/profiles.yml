@@ -1,4 +1,3 @@
-
 weather_dbt:
   target: dev
   outputs:
@@ -11,7 +10,6 @@ weather_dbt:
       dbname: "{{ env_var('DBT_DBNAME', 'analytics') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
       threads: 1
-
 elementary:
   target: dev
   outputs:

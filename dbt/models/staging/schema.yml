@@ -1,18 +1,30 @@
 version: 2
-
 models:
   - name: stg_weather
     description: "Staging model for weather data. Cleans and standardizes raw input."
+    config:
+      tags: [weather, stg]
     columns:
       - name: mongo_id
         description: "MongoDB document id"
         tests:
           - unique
           - not_null
+          - relationships:
+              arguments:
+                to: source('raw_weather', 'weather_raw')
+                field: mongo_id
       - name: observed_at
         description: "Timestamp the document was fetched (UTC)"
         tests:
           - not_null
+      - name: source_system
+        description: "Where this snapshot came from (e.g., yandex or mock fallback)"
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [yandex, mock, unknown]
       - name: temperature_c
         description: "Air temperature in Celsius"
         tests:
@@ -22,3 +34,9 @@ models:
         description: "Relative humidity (%)"
         tests:
           - not_null
+      - name: pressure_mm
+        description: "Atmospheric pressure (mmHg)"
+      - name: pressure_pa
+        description: "Atmospheric pressure (Pa)"
+      - name: loaded_at
+        description: "When this record was loaded into Postgres landing (ingestion time)"

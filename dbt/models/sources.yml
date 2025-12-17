@@ -1,5 +1,4 @@
 version: 2
-
 sources:
   - name: raw_weather
     database: analytics
@@ -9,8 +8,15 @@ sources:
         description: "Raw MongoDB documents loaded into Postgres (EL landing table)"
         columns:
           - name: mongo_id
+            description: "MongoDB _id as text"
             tests:
               - unique
               - not_null
           - name: fetched_at
+            description: "Event timestamp (ISO8601)"
+            tests:
+              - not_null
           - name: payload
+            description: "Raw document payload as JSONB"
+            tests:
+              - not_null

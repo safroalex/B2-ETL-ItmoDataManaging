@@ -2,17 +2,17 @@
     config(
         materialized='incremental',
         unique_key='mongo_id',
-        incremental_strategy='merge'
+        incremental_strategy='merge',
+        on_schema_change='sync_all_columns'
     )
 }}
 
-with stg as (
-    select * from {{ ref('stg_weather') }}
-)
+with stg as (select * from {{ ref('stg_weather') }})
 
 select
     mongo_id,
     observed_at,
+    source_system,
     temperature_c,
     humidity,
     pressure_mm,
@@ -22,5 +22,5 @@ select
 from stg
 
 {% if is_incremental() %}
-  where observed_at > (select max(observed_at) from {{ this }})
+    where observed_at > (select max(observed_at) from {{ this }})
 {% endif %}
