@@ -178,9 +178,29 @@ jobs:
           ls -la dbt/target | head -n 50 || true
           docker compose exec -T airflow-scheduler bash -lc "ls -la /opt/airflow/dbt/target | head -n 50" || true
 
+            # Try to generate the report directly once (idempotent). This removes dependence on Airflow task timing.
+            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." || true
+
+            echo "--- report diagnostics (host/container/server) ---"
+            echo "Host permissions:"
+            ls -ld dbt dbt/target || true
+            ls -la dbt/target | head -n 200 || true
+            echo "Airflow container permissions:"
+            docker compose exec -T airflow-scheduler bash -lc "id && ls -ld /opt/airflow/dbt/target && ls -la /opt/airflow/dbt/target | head -n 200" || true
+            echo "File existence checks:"
+            test -f dbt/target/elementary_report.html && echo "OK: host dbt/target/elementary_report.html exists" || echo "MISSING: host dbt/target/elementary_report.html"
+            docker compose exec -T airflow-scheduler bash -lc "test -f /opt/airflow/dbt/target/elementary_report.html && echo OK: airflow /opt/airflow/dbt/target/elementary_report.html exists || echo MISSING: airflow /opt/airflow/dbt/target/elementary_report.html" || true
+            echo "Report server directory listing (HTTP):"
+            curl -fsS http://localhost:8081/ | head -n 120 || true
+            echo "Report server directory listing (container):"
+            docker compose exec -T elementary-report bash -lc "ls -ld /reports && ls -la /reports | head -n 200" || true
+
           # Verify Elementary report is served (file appears after edr_report task)
           if ! retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null; then
             echo "Report not served yet; attempting direct report generation as fallback" >&2
+              echo "--- report diagnostics (before fallback) ---"
+              curl -fsSI http://localhost:8081/elementary_report.html || true
+              curl -fsS http://localhost:8081/ | head -n 120 || true
             docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ."
             ls -la dbt/target | head -n 50 || true
             retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
