@@ -114,6 +114,11 @@ jobs:
           # Ensure DAGs are unpaused
           # Airflow webserver may be healthy slightly earlier than the scheduler CLI is usable.
           retry "airflow CLI" 20 3 docker compose exec -T airflow-scheduler airflow version >/dev/null || { dump_logs; exit 1; }
+
+            # After a cold start, DAG parsing can lag behind /health. Wait until the scheduler sees our DAGs.
+            retry "airflow sees DAG weather_ingest" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list | grep -q '^weather_ingest'" || { dump_logs; exit 1; }
+            retry "airflow sees DAG el_weather" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list | grep -q '^el_weather'" || { dump_logs; exit 1; }
+
           docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest || true
           docker compose exec -T airflow-scheduler airflow dags unpause el_weather || true
 
@@ -201,6 +206,11 @@ jobs:
               echo "--- report diagnostics (before fallback) ---"
               curl -fsSI http://localhost:8081/elementary_report.html || true
               curl -fsS http://localhost:8081/ | head -n 120 || true
+
+              echo "--- airflow task diagnostics (edr_report) ---"
+              docker compose exec -T airflow-scheduler airflow tasks state el_weather edr_report "$CUR_HOUR_UTC" || true
+              docker compose exec -T airflow-scheduler airflow tasks logs el_weather edr_report "$CUR_HOUR_UTC" | tail -n 200 || true
+
             docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ."
             ls -la dbt/target | head -n 50 || true
             retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null || { dump_logs; exit 1; }
