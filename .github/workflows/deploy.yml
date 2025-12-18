@@ -94,6 +94,10 @@ jobs:
             docker compose logs --no-color --tail=120 elementary-report || true
           }
 
+            # Diagnostics for unexpected early exits (test environment).
+            trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- DEPLOY FAILED (exit=$code) ---"; dump_logs; fi' EXIT
+            trap 'code=$?; echo "--- ERR trap (exit=$code) cmd=${BASH_COMMAND} ---"' ERR
+
           # Airflow webserver can take time to start; use the /health endpoint
             retry "airflow /health" 40 3 curl -fsS http://localhost:8080/health >/dev/null || { dump_logs; exit 1; };
 
@@ -111,6 +115,7 @@ jobs:
 
           echo "--- database checks ---"
             retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow || { dump_logs; exit 1; };
+            echo "OK: postgres ready; checking mongodb next"
             retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" || { dump_logs; exit 1; };
             echo "OK: database checks passed"
 
