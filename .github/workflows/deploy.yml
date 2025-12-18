@@ -21,8 +21,10 @@ jobs:
       - name: Package repository
         run: tar --exclude='.git' -czf "$ARCHIVE_PATH" .
       - name: Upload bundle to server
-        run: sshpass -p "$DEPLOY_PASSWORD" scp -P 22 -o StrictHostKeyChecking=no "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
-      - name: Remote: deploy stack (extract + compose up)
+        run: |
+          sshpass -p "$DEPLOY_PASSWORD" scp -P 22 -o StrictHostKeyChecking=no \
+            "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
+      - name: Remote - deploy stack (extract + compose up)
         run: |
           sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
           set -euo pipefail
@@ -54,7 +56,7 @@ jobs:
           docker compose ps
           EOF
 
-      - name: Remote: smoke checks + DB readiness
+      - name: Remote - smoke checks + DB readiness
         run: |
           sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
           set -euo pipefail
@@ -105,7 +107,7 @@ jobs:
           echo "OK: database checks passed"
           EOF
 
-      - name: Remote: run Airflow DAGs + generate Elementary report
+      - name: Remote - run Airflow DAGs + generate Elementary report
         run: |
           sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
           set -euo pipefail
