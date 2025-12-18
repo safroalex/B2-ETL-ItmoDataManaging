@@ -26,8 +26,8 @@ jobs:
             "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
       - name: Remote - deploy stack (extract + compose up)
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
-          set -euo pipefail
+          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          echo "=== STEP: deploy stack (begin) ==="
           DEPLOY_PATH="/root/b2-etl-itmodata"
           mkdir -p "$DEPLOY_PATH"
           chown root:"root" "$DEPLOY_PATH"
@@ -54,12 +54,13 @@ jobs:
           docker compose up -d --build
           echo "--- compose ps ---"
           docker compose ps
+          echo "=== STEP: deploy stack (end) ==="
           EOF
 
       - name: Remote - smoke checks + DB readiness
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
-          set -euo pipefail
+          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          echo "=== STEP: smoke+db (begin) ==="
           cd /root/b2-etl-itmodata
 
           retry() {
@@ -82,12 +83,16 @@ jobs:
           }
 
           dump_logs() {
+            echo "--- compose ps ---" || true
+            docker compose ps || true
             echo "--- airflow-webserver logs (tail) ---" || true
             docker compose logs --no-color --tail=120 airflow-webserver || true
             echo "--- airflow-scheduler logs (tail) ---" || true
             docker compose logs --no-color --tail=120 airflow-scheduler || true
             echo "--- weather-service logs (tail) ---" || true
             docker compose logs --no-color --tail=120 weather-service || true
+            echo "--- elementary-report logs (tail) ---" || true
+            docker compose logs --no-color --tail=120 elementary-report || true
             echo "--- mongodb logs (tail) ---" || true
             docker compose logs --no-color --tail=120 mongodb || true
             echo "--- postgres logs (tail) ---" || true
@@ -97,20 +102,21 @@ jobs:
           trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- SMOKE/DB STEP FAILED (exit=$code) ---"; dump_logs; fi' EXIT
 
           echo "--- smoke checks (localhost) ---"
-          retry "airflow /health" 40 3 curl -fsS http://localhost:8080/health >/dev/null
-          retry "weather-service /health" 20 2 curl -fsS http://localhost:8000/health >/dev/null
-          retry "elementary-report port" 20 2 curl -fsSI http://localhost:8081/ >/dev/null
+          retry "airflow /health" 40 3 bash -lc 'curl -fsS --connect-timeout 2 --max-time 5 http://localhost:8080/health >/dev/null 2>&1'
+          retry "weather-service /health" 20 2 bash -lc 'curl -fsS --connect-timeout 2 --max-time 5 http://localhost:8000/health >/dev/null 2>&1'
+          retry "elementary-report port" 20 2 bash -lc 'curl -fsSI --connect-timeout 2 --max-time 5 http://localhost:8081/ >/dev/null 2>&1'
 
           echo "--- database checks ---"
           retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow
           retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null
           echo "OK: database checks passed"
+          echo "=== STEP: smoke+db (end) ==="
           EOF
 
       - name: Remote - run Airflow DAGs + generate Elementary report
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 <<'EOF'
-          set -euo pipefail
+          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          echo "=== STEP: pipeline+report (begin) ==="
           cd /root/b2-etl-itmodata
 
           retry() {
@@ -214,4 +220,5 @@ jobs:
           fi
 
           echo "Elementary report is available at http://<host>:8081/elementary_report.html"
+          echo "=== STEP: pipeline+report (end) ==="
           EOF
