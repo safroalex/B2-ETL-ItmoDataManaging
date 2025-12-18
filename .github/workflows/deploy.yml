@@ -157,8 +157,9 @@ jobs:
           docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest </dev/null || true
           docker compose exec -T airflow-scheduler airflow dags unpause el_weather </dev/null || true
 
-          CUR_HOUR_UTC="$(date -u +"%Y-%m-%dT%H:00:00+00:00")"
-          echo "Using CUR_HOUR_UTC=$CUR_HOUR_UTC"
+          # Use a unique logical date to avoid DagRunAlreadyExists when deploy is rerun within the same hour.
+          CUR_EXEC_UTC="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
+          echo "Using CUR_EXEC_UTC=$CUR_EXEC_UTC"
 
           wait_dag_run() {
             local dag_id="$1"
@@ -168,6 +169,7 @@ jobs:
             started="$(date +%s)"
             while true; do
               state="$(docker compose exec -T airflow-scheduler airflow dags list-runs -d "$dag_id" --no-backfill -o table \
+                </dev/null \
                 | awk -F'|' -v rid="$run_id" 'BEGIN{IGNORECASE=1} $2 ~ rid {gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3; exit}')"
               if [ -n "$state" ]; then
                 echo "$dag_id/$run_id state=$state"
@@ -194,8 +196,8 @@ jobs:
           done
 
           EL_RUN_ID="postdeploy_el_weather_${TS}"
-          echo "Triggering el_weather exec_date=$CUR_HOUR_UTC run_id=$EL_RUN_ID"
-          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_HOUR_UTC" --run-id "$EL_RUN_ID" </dev/null
+          echo "Triggering el_weather exec_date=$CUR_EXEC_UTC run_id=$EL_RUN_ID"
+          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_EXEC_UTC" --run-id "$EL_RUN_ID" </dev/null
           wait_dag_run el_weather "$EL_RUN_ID" 1800
 
           echo "--- verify outputs ---"
