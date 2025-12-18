@@ -80,6 +80,9 @@ jobs:
             done
           }
 
+            # Debug trace (test environment; helps pinpoint early exits)
+            set -x
+
           dump_logs() {
             echo "--- airflow-webserver logs (tail) ---" || true
             docker compose logs --no-color --tail=120 airflow-webserver || true
@@ -107,8 +110,9 @@ jobs:
           curl -fsSI http://localhost:8081/ | head -n 5
 
           echo "--- database checks ---"
-            retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow >/dev/null || { dump_logs; exit 1; }
-            retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null || { dump_logs; exit 1; }
+            retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow || { dump_logs; exit 1; }
+            retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" || { dump_logs; exit 1; }
+            echo "OK: database checks passed"
 
           echo "--- post-deploy pipeline run (weather_ingest + el_weather) ---"
           # Ensure DAGs are unpaused
