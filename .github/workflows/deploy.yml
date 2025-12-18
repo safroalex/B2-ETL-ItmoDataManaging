@@ -107,8 +107,8 @@ jobs:
           retry "elementary-report port" 20 2 bash -lc 'curl -fsSI --connect-timeout 2 --max-time 5 http://localhost:8081/ >/dev/null 2>&1'
 
           echo "--- database checks ---"
-          retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow
-          retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null
+          retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow </dev/null
+          retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" </dev/null >/dev/null
           echo "OK: database checks passed"
           echo "=== STEP: smoke+db (end) ==="
           EOF
@@ -150,12 +150,12 @@ jobs:
           trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- PIPELINE STEP FAILED (exit=$code) ---"; dump_logs; fi' EXIT
 
           echo "--- post-deploy pipeline run (weather_ingest + el_weather) ---"
-          retry "airflow CLI" 20 3 docker compose exec -T airflow-scheduler airflow version >/dev/null
-          retry "airflow sees DAG weather_ingest" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list | grep -q '^weather_ingest'"
-          retry "airflow sees DAG el_weather" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list | grep -q '^el_weather'"
+          retry "airflow CLI" 20 3 docker compose exec -T airflow-scheduler airflow version </dev/null >/dev/null
+          retry "airflow sees DAG weather_ingest" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list </dev/null | grep -q '^weather_ingest'"
+          retry "airflow sees DAG el_weather" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list </dev/null | grep -q '^el_weather'"
 
-          docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest || true
-          docker compose exec -T airflow-scheduler airflow dags unpause el_weather || true
+          docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest </dev/null || true
+          docker compose exec -T airflow-scheduler airflow dags unpause el_weather </dev/null || true
 
           CUR_HOUR_UTC="$(date -u +"%Y-%m-%dT%H:00:00+00:00")"
           echo "Using CUR_HOUR_UTC=$CUR_HOUR_UTC"
@@ -189,32 +189,32 @@ jobs:
           for i in 1 2; do
             INGEST_RUN_ID="postdeploy_weather_ingest_${TS}_${i}"
             echo "Triggering weather_ingest run_id=$INGEST_RUN_ID"
-            docker compose exec -T airflow-scheduler airflow dags trigger weather_ingest --run-id "$INGEST_RUN_ID"
+            docker compose exec -T airflow-scheduler airflow dags trigger weather_ingest --run-id "$INGEST_RUN_ID" </dev/null
             wait_dag_run weather_ingest "$INGEST_RUN_ID" 300
           done
 
           EL_RUN_ID="postdeploy_el_weather_${TS}"
           echo "Triggering el_weather exec_date=$CUR_HOUR_UTC run_id=$EL_RUN_ID"
-          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_HOUR_UTC" --run-id "$EL_RUN_ID"
+          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_HOUR_UTC" --run-id "$EL_RUN_ID" </dev/null
           wait_dag_run el_weather "$EL_RUN_ID" 1800
 
           echo "--- verify outputs ---"
-          docker compose exec -T postgres psql -U airflow -d analytics -c "SELECT count(*) AS weather_raw_rows FROM weather_raw;" | cat
+          docker compose exec -T postgres psql -U airflow -d analytics -c "SELECT count(*) AS weather_raw_rows FROM weather_raw;" </dev/null | cat
 
           echo "--- dbt target directory (host + airflow container) ---"
           ls -la dbt/target | head -n 200 || true
-          docker compose exec -T airflow-scheduler bash -lc "ls -la /opt/airflow/dbt/target | head -n 200" || true
+          docker compose exec -T airflow-scheduler bash -lc "ls -la /opt/airflow/dbt/target | head -n 200" </dev/null || true
 
           echo "--- generate elementary report (direct) ---"
-          docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." || true
+          docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." </dev/null || true
 
           echo "--- report server listing ---"
           curl -fsS http://localhost:8081/ | head -n 120 || true
-          docker compose exec -T elementary-report bash -lc "ls -la /reports | head -n 200" || true
+          docker compose exec -T elementary-report bash -lc "ls -la /reports | head -n 200" </dev/null || true
 
           if ! retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null; then
             echo "Report not served yet; running full fallback (dbt + edr)" >&2
-            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ."
+            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ." </dev/null
             ls -la dbt/target | head -n 200 || true
             retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null
           fi
