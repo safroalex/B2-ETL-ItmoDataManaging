@@ -11,6 +11,25 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DEPLOY_PASSWORD: ${{ secrets.ROOT_DEPLOY_PASSWORD }}
+      # Keep SSH connection alive during long remote steps to avoid exit=255 on transient network drops.
+      SSH_OPTS: >-
+        -p 22
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=15
+        -o ServerAliveCountMax=8
+        -o ConnectTimeout=20
+        -o TCPKeepAlive=yes
+        -o LogLevel=ERROR
+      SCP_OPTS: >-
+        -P 22
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=15
+        -o ServerAliveCountMax=8
+        -o ConnectTimeout=20
+        -o TCPKeepAlive=yes
+        -o LogLevel=ERROR
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,11 +41,11 @@ jobs:
         run: tar --exclude='.git' -czf "$ARCHIVE_PATH" .
       - name: Upload bundle to server
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" scp -P 22 -o StrictHostKeyChecking=no \
+          sshpass -p "$DEPLOY_PASSWORD" scp $SCP_OPTS \
             "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
       - name: Remote - deploy stack (extract + compose up)
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
           echo "=== STEP: deploy stack (begin) ==="
           DEPLOY_PATH="/root/b2-etl-itmodata"
           mkdir -p "$DEPLOY_PATH"
@@ -59,7 +78,7 @@ jobs:
 
       - name: Remote - smoke checks + DB readiness
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
           echo "=== STEP: smoke+db (begin) ==="
           cd /root/b2-etl-itmodata
 
@@ -115,7 +134,7 @@ jobs:
 
       - name: Remote - run Airflow DAGs + generate Elementary report
         run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh -p 22 -o StrictHostKeyChecking=no root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
+          sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
           echo "=== STEP: pipeline+report (begin) ==="
           cd /root/b2-etl-itmodata
 
