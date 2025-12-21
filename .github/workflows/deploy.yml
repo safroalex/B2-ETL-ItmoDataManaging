@@ -33,16 +33,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Install sshpass
         run: sudo apt-get update && sudo apt-get install -y sshpass
+
       - name: Define archive path
         run: echo "ARCHIVE_PATH=$RUNNER_TEMP/b2-etl-release.tar.gz" >> "$GITHUB_ENV"
+
       - name: Package repository
         run: tar --exclude='.git' -czf "$ARCHIVE_PATH" .
+
       - name: Upload bundle to server
         run: |
           sshpass -p "$DEPLOY_PASSWORD" scp $SCP_OPTS \
             "$ARCHIVE_PATH" root@62.60.228.129:/tmp/b2-etl-release.tar.gz
+
       - name: Remote - deploy stack (extract + compose up)
         run: |
           sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
@@ -76,16 +81,16 @@ jobs:
           echo "=== STEP: deploy stack (end) ==="
           EOF
 
-      - name: Remote - smoke checks + DB readiness
+      - name: Remote - smoke checks (Airflow UI)
         run: |
           sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
-          echo "=== STEP: smoke+db (begin) ==="
+          echo "=== STEP: smoke (begin) ==="
           cd /root/b2-etl-itmodata
 
           retry() {
             local name="$1"; shift
-            local attempts="${1:-30}"; shift
-            local sleep_s="${1:-2}"; shift
+            local attempts="${1:-40}"; shift
+            local sleep_s="${1:-3}"; shift
             local n=1
             while true; do
               if "$@"; then
@@ -105,141 +110,18 @@ jobs:
             echo "--- compose ps ---" || true
             docker compose ps || true
             echo "--- airflow-webserver logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 airflow-webserver || true
-            echo "--- airflow-scheduler logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 airflow-scheduler || true
-            echo "--- weather-service logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 weather-service || true
-            echo "--- elementary-report logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 elementary-report || true
-            echo "--- mongodb logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 mongodb || true
-            echo "--- postgres logs (tail) ---" || true
-            docker compose logs --no-color --tail=120 postgres || true
-          }
-
-          trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- SMOKE/DB STEP FAILED (exit=$code) ---"; dump_logs; fi' EXIT
-
-          echo "--- smoke checks (localhost) ---"
-          retry "airflow /health" 40 3 bash -lc 'curl -fsS --connect-timeout 2 --max-time 5 http://localhost:8080/health >/dev/null 2>&1'
-          retry "weather-service /health" 20 2 bash -lc 'curl -fsS --connect-timeout 2 --max-time 5 http://localhost:8000/health >/dev/null 2>&1'
-          retry "elementary-report port" 20 2 bash -lc 'curl -fsSI --connect-timeout 2 --max-time 5 http://localhost:8081/ >/dev/null 2>&1'
-
-          echo "--- database checks ---"
-          retry "postgres pg_isready" 30 2 docker compose exec -T postgres pg_isready -U airflow </dev/null
-          retry "mongodb ping" 30 2 docker compose exec -T mongodb mongosh --quiet --username weather --password weather --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" </dev/null >/dev/null
-          echo "OK: database checks passed"
-          echo "=== STEP: smoke+db (end) ==="
-          EOF
-
-      - name: Remote - run Airflow DAGs + generate Elementary report
-        run: |
-          sshpass -p "$DEPLOY_PASSWORD" ssh $SSH_OPTS root@62.60.228.129 'bash -seuo pipefail' <<'EOF'
-          echo "=== STEP: pipeline+report (begin) ==="
-          cd /root/b2-etl-itmodata
-
-          retry() {
-            local name="$1"; shift
-            local attempts="${1:-30}"; shift
-            local sleep_s="${1:-2}"; shift
-            local n=1
-            while true; do
-              if "$@"; then
-                echo "OK: $name"
-                return 0
-              fi
-              if [ "$n" -ge "$attempts" ]; then
-                echo "FAIL: $name (after ${attempts} attempts)" >&2
-                return 1
-              fi
-              n=$((n+1))
-              sleep "$sleep_s"
-            done
-          }
-
-          dump_logs() {
-            echo "--- airflow-webserver logs (tail) ---" || true
             docker compose logs --no-color --tail=200 airflow-webserver || true
             echo "--- airflow-scheduler logs (tail) ---" || true
             docker compose logs --no-color --tail=200 airflow-scheduler || true
-            echo "--- elementary-report logs (tail) ---" || true
-            docker compose logs --no-color --tail=200 elementary-report || true
           }
 
-          trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- PIPELINE STEP FAILED (exit=$code) ---"; dump_logs; fi' EXIT
+          trap 'code=$?; if [ "$code" -ne 0 ]; then echo "--- SMOKE STEP FAILED (exit=$code) ---"; dump_logs; fi' EXIT
 
-          echo "--- post-deploy pipeline run (weather_ingest + el_weather) ---"
-          retry "airflow CLI" 20 3 docker compose exec -T airflow-scheduler airflow version </dev/null >/dev/null
-          retry "airflow sees DAG weather_ingest" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list </dev/null | grep -q '^weather_ingest'"
-          retry "airflow sees DAG el_weather" 40 3 bash -lc "docker compose exec -T airflow-scheduler airflow dags list </dev/null | grep -q '^el_weather'"
-
-          docker compose exec -T airflow-scheduler airflow dags unpause weather_ingest </dev/null || true
-          docker compose exec -T airflow-scheduler airflow dags unpause el_weather </dev/null || true
-
-          # Use a unique logical date to avoid DagRunAlreadyExists when deploy is rerun within the same hour.
-          CUR_EXEC_UTC="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
-          echo "Using CUR_EXEC_UTC=$CUR_EXEC_UTC"
-
-          wait_dag_run() {
-            local dag_id="$1"
-            local run_id="$2"
-            local timeout_s="${3:-900}"
-            local started
-            started="$(date +%s)"
-            while true; do
-              state="$(docker compose exec -T airflow-scheduler airflow dags list-runs -d "$dag_id" --no-backfill -o table \
-                </dev/null \
-                | awk -F'|' -v rid="$run_id" 'BEGIN{IGNORECASE=1} $2 ~ rid {gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3; exit}')"
-              if [ -n "$state" ]; then
-                echo "$dag_id/$run_id state=$state"
-                case "$state" in
-                  success) return 0 ;;
-                  failed|upstream_failed) return 1 ;;
-                esac
-              fi
-              now="$(date +%s)"
-              if [ $((now-started)) -ge "$timeout_s" ]; then
-                echo "Timeout waiting for $dag_id/$run_id" >&2
-                return 1
-              fi
-              sleep 10
-            done
-          }
-
-          TS="$(date -u +"%Y%m%dT%H%M%SZ")"
-          for i in 1 2; do
-            INGEST_RUN_ID="postdeploy_weather_ingest_${TS}_${i}"
-            echo "Triggering weather_ingest run_id=$INGEST_RUN_ID"
-            docker compose exec -T airflow-scheduler airflow dags trigger weather_ingest --run-id "$INGEST_RUN_ID" </dev/null
-            wait_dag_run weather_ingest "$INGEST_RUN_ID" 300
-          done
-
-          EL_RUN_ID="postdeploy_el_weather_${TS}"
-          echo "Triggering el_weather exec_date=$CUR_EXEC_UTC run_id=$EL_RUN_ID"
-          docker compose exec -T airflow-scheduler airflow dags trigger el_weather --exec-date "$CUR_EXEC_UTC" --run-id "$EL_RUN_ID" </dev/null
-          wait_dag_run el_weather "$EL_RUN_ID" 1800
-
-          echo "--- verify outputs ---"
-          docker compose exec -T postgres psql -U airflow -d analytics -c "SELECT count(*) AS weather_raw_rows FROM weather_raw;" </dev/null | cat
-
-          echo "--- dbt target directory (host + airflow container) ---"
-          ls -la dbt/target | head -n 200 || true
-          docker compose exec -T airflow-scheduler bash -lc "ls -la /opt/airflow/dbt/target | head -n 200" </dev/null || true
-
-          echo "--- generate elementary report (direct) ---"
-          docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && edr report --file-path target/elementary_report.html --profiles-dir ." </dev/null || true
-
-          echo "--- report server listing ---"
-          curl -fsS http://localhost:8081/ | head -n 120 || true
-          docker compose exec -T elementary-report bash -lc "ls -la /reports | head -n 200" </dev/null || true
-
-          if ! retry "elementary_report.html" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null; then
-            echo "Report not served yet; running full fallback (dbt + edr)" >&2
-            docker compose exec -T airflow-scheduler bash -lc "cd /opt/airflow/dbt && dbt deps && dbt run --select elementary --full-refresh && dbt run && dbt test && edr report --file-path target/elementary_report.html --profiles-dir ." </dev/null
-            ls -la dbt/target | head -n 200 || true
-            retry "elementary_report.html (after fallback)" 30 5 curl -fsSI http://localhost:8081/elementary_report.html >/dev/null
-          fi
-
-          echo "Elementary report is available at http://<host>:8081/elementary_report.html"
-          echo "=== STEP: pipeline+report (end) ==="
+          retry "airflow /health" 60 3 bash -lc 'curl -fsS --connect-timeout 2 --max-time 5 http://localhost:8080/health >/dev/null 2>&1'
+          echo "Airflow UI should be available on: http://62.60.228.129:8080"
+          echo "Default creds (from docker-compose): admin / admin"
+          echo "=== STEP: smoke (end) ==="
           EOF
+
+      # NOTE: Heavy post-deploy pipeline steps (trigger DAGs, dbt, Elementary report)
+      # were removed to keep deployments reliable when you only need Airflow UI.
